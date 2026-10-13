@@ -1,6 +1,7 @@
 # WorkBuddy Hub / Panel 整合风险审计（独立证据核验，只读）
 
 日期：2026-10-13（Asia/Shanghai）
+归档说明：下述临时工作副本已随会话清理，路径仅标识当时的核验范围；本文为历史快照，当前接入以 [运行约定](../account-hub-bridge.md) 为准。
 核验对象：`/tmp/wb_src/ardeyouxipianyi__workbuddy2api-hub`（下称 **hub**）、`/tmp/wb_src/linguo2625469__workbuddy2api-panel`（下称 **panel**）
 状态：纯只读。未安装、未编译、未运行任何项目；未写出任何凭据原文。
 方法：源码 + 自带测试 + GitHub 开放 Issue（`gh`，只读查询）。

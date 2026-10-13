@@ -1,7 +1,7 @@
 # WorkBuddy 反代 / 管理项目对比（只读调研，2026-10-13）
 
 > 范围：只读检索与源码核对，未改动 /root 下任何项目，未向任何账号发起真实请求。
-> 克隆与抓取痕迹在 `/tmp/wb_src`、`/tmp/wb_research`。
+> 当时的克隆与抓取位于 `/tmp/wb_src`、`/tmp/wb_research`，工作副本已随会话清理。本文为历史快照，当前接入以 [运行约定](../account-hub-bridge.md) 为准。
 
 ---
 

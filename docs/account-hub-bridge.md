@@ -44,3 +44,14 @@ access/refresh token；Account Hub 只保存 `accountRef`、UID、realm 和委�
 订阅刷新保留现用的可用节点；本地 `account-session-reserve` 保存仍被会话依赖的
 连接配置。删除重复源前先核对替代源和活跃绑定，不能按订阅名称或节点数量判断用途。
 代理故障、任务排队和上游挑战分别处理，不能据一次超时清空有效 Cookie。
+
+## 管理会话与并发
+
+原生面板使用 `X-Panel-Token`，不通过 Cookie 自动附带管理凭据，也不从查询串读取。
+令牌仅存在进程内，最长有效七天，退出或重启即失效；面板重新登录不会清除
+WorkBuddy 账号令牌。机器连接使用受限 bridge 令牌，不依赖面板会话。
+模型请求的原生并发上限默认 32，由 `WB_MAX_CONCURRENT_CHAT` 配置；`auto`
+按就绪账号扩展槽位。占满返回 503，不能把本地排队拒绝归因为账号或出口失效。
+
+国际版页面、OneID 弹窗和双层 state 的历史依据见
+[OAuth 调研](research-20261013/international-oauth-flow.md)，上游变化时以实际官方流程复核。

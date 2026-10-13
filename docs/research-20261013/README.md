@@ -20,3 +20,5 @@
 ## 使用约束
 
 本目录内容不构成运行时依赖。当前操作入口、凭据归属与验收要求见 [接入运行约定](../account-hub-bridge.md)，实现以 `mine` 分支为准。历史候选的默认口令、导出示例或临时命令不用于当前部署；凭据、浏览器状态与完整导出不入 Git。
+
+国际版 OneID/GitHub 弹窗、双层 state 和回调链的历史依据见 [国际版 OAuth 调研](international-oauth-flow.md)。生产入口和运行验收以 [接入说明](../account-hub-bridge.md) 为准。

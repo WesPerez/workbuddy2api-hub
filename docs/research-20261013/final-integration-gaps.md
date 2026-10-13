@@ -1,6 +1,7 @@
 # 最终整合方案：缺口核验（只读）
 
 日期：2026-10-13（Asia/Shanghai）
+归档说明：下述临时工作副本已随会话清理，路径仅标识当时的核验范围；本文为历史快照，当前接入以 [运行约定](../account-hub-bridge.md) 为准。
 范围：`/tmp/wb_src/ardeyouxipianyi__workbuddy2api-hub`（hub）、`/tmp/wb_src/ithtelab__workbuddy-manager`（manager）、`/tmp/workbuddy-research-root-20261013/manager-core`（Go core，已解包）、`/root/metapi-check-in`（MetAPI）。
 性质：纯只读。未安装、未编译、未运行、未触真实账号；未修改任何项目。
 
