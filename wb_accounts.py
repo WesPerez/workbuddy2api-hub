@@ -91,6 +91,10 @@ def fetch_account_profile(account, timeout=15):
         data = json.loads(resp.read().decode("utf-8"))
     if not isinstance(data, dict):
         raise RuntimeError("profile response is not an object")
+    if "code" in data or "data" in data:
+        if data.get("code") != 0 or not isinstance(data.get("data"), dict):
+            raise RuntimeError("profile response did not succeed")
+        data = data["data"]
     uid = str(data.get("uid") or "")
     if uid and account.uid and uid != account.uid:
         raise RuntimeError("profile uid mismatch")

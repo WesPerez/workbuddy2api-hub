@@ -81,6 +81,18 @@ class FetchProfileTests(unittest.TestCase):
         finally:
             wb_accounts.urlopen = old
 
+    def test_international_success_envelope_checks_the_inner_identity(self):
+        account = wb_accounts.Account({"uid": "uid-1", "accessToken": "tok", "realm": "intl"})
+        with mock.patch.object(wb_accounts, "urlopen", return_value=FakeResponse({
+                "code": 0, "data": {"uid": "uid-1", "nickname": " Intl ", "email": "private@example.com"}})):
+            self.assertEqual(wb_accounts.fetch_account_profile(account), ("uid-1", "Intl"))
+        for payload in ({"code": 1, "data": {"uid": "uid-1"}},
+                        {"code": 0, "data": {"uid": "another-account"}},
+                        {"code": 0, "data": None}):
+            with mock.patch.object(wb_accounts, "urlopen", return_value=FakeResponse(payload)):
+                with self.assertRaises(RuntimeError):
+                    wb_accounts.fetch_account_profile(account)
+
     def test_non_object_response_is_rejected(self):
         def fake_urlopen(req, timeout=30, proxy=""):
             return FakeResponse(["not", "an", "object"])
