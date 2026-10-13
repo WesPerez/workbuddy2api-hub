@@ -1,0 +1,118 @@
+"""Scoped login delivery, ownership, egress and secret export regressions."""
+import base64
+import copy
+import io
+import json
+import os
+from pathlib import Path
+import sys
+import threading
+import time
+import unittest
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _isolated_dirs import isolated_data_dirs
+_TMP = isolated_data_dirs("wb-bridge-")
+os.environ["WB_DATA_DIR"] = _TMP.name
+import wb_accounts as accounts
+import wb_bridge as bridge
+import wb_upstream_pool as upstream
+
+def route(ip="203.0.113.5"):
+    return {"key": "ldc-9", "proxy": {"server": "http://127.0.0.1:10834", "username": "AppsGlobal.ldc-9", "password": "synthetic-proxy-secret"},
+            "binding": {"platform": "AppsGlobal", "leaseGuardVersion": 1, "nodeHash": "a" * 32, "leaseCreatedAt": "123456789", "ip": ip}}
+
+def token(uid="official-uid"):
+    enc = lambda v: base64.urlsafe_b64encode(json.dumps(v).encode()).decode().rstrip("=")
+    return enc({"alg": "none"}) + "." + enc({"sub": uid, "exp": int(time.time()) + 3600}) + ".signature"
+
+class BridgeTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.temp = tempfile.TemporaryDirectory(dir=_TMP.name)
+        self.env = patch.dict(os.environ, {"WB_DATA_DIR": self.temp.name})
+        self.env.start()
+        self.pool = accounts.AccountPool(str(Path(self.temp.name) / "accounts"))
+        self.bridge = bridge.Bridge(self.pool)
+
+    def tearDown(self):
+        self.bridge.db.close(); self.env.stop(); self.temp.cleanup()
+
+    def pending(self, uid=None):
+        payload = {"accountRef": "account-hub:instance:9", "idempotencyKey": "synthetic-login-001",
+                   "githubLogin": "WesPerez", "route": route(), "expectedUid": uid}
+        with patch.object(accounts, "http_json", return_value={"data": {"state": "synthetic-state", "authUrl": "https://www.workbuddy.ai/login?state=synthetic-state"}}):
+            return self.bridge.start(payload)
+
+    def test_guard_cannot_fall_back_to_direct_even_when_pool_is_disabled(self):
+        proxy = bridge.guarded_proxy(route())
+        with patch.object(upstream, "enabled", return_value=False), patch.object(upstream, "urlopen", side_effect=upstream.PoolBypass("unsupported")), patch.object(accounts.urllib.request, "urlopen") as direct:
+            with self.assertRaises(RuntimeError): accounts.urlopen("https://www.workbuddy.ai/", proxy=proxy)
+            direct.assert_not_called()
+        with patch.object(upstream, "_proxy_bypassed", return_value=True):
+            self.assertEqual(upstream._fold_bypassed("www.workbuddy.ai", proxy)[1], proxy)
+
+    def test_native_import_and_public_export_preserve_the_protection_boundary(self):
+        acc = accounts.Account({"uid": "u", "realm": "intl", "accessToken": token(), "refreshToken": "synthetic-refresh",
+                                "source": "account-hub", "bridgeRef": "account-hub:instance:9", "bridgeRoute": route()})
+        row = accounts.account_to_export(acc)
+        for value in [row, {"auth": row}, {"account": row}, {"access_token": token(), "bridge_route": route()}]:
+            with self.assertRaises(ValueError): accounts.normalise_import_row(value)
+        encoded = json.dumps(accounts.build_export_document([acc], include_secrets=False))
+        for secret in [token(), "synthetic-refresh", "synthetic-proxy-secret"]: self.assertNotIn(secret, encoded)
+        orphan = accounts.Account({"uid": "orphan", "source": "account-hub", "accessToken": token()})
+        with self.assertRaises(ValueError): orphan.request_snapshot()
+
+    def test_snapshot_cannot_mix_token_and_route_during_reauthorization(self):
+        acc = accounts.Account({"uid": "u", "realm": "intl", "accessToken": "old", "bridgeRef": "account-hub:instance:9", "bridgeRoute": route()})
+        entered, release, committed = threading.Event(), threading.Event(), threading.Event()
+        original = acc.headers
+        def headers(purpose="chat"):
+            result = original(purpose); entered.set(); self.assertTrue(release.wait(3)); return result
+        acc.headers = headers
+        captured = []
+        reader = threading.Thread(target=lambda: captured.append(acc.request_snapshot()))
+        def write():
+            with acc._refresh_lock:
+                acc.access_token = "new"; acc.bridge_route = route("203.0.113.6"); committed.set()
+        writer = threading.Thread(target=write)
+        reader.start(); self.assertTrue(entered.wait(3)); writer.start()
+        self.assertFalse(committed.wait(0.05)); release.set(); reader.join(3); writer.join(3)
+        self.assertEqual(captured[0][0]["Authorization"], "Bearer old")
+        self.assertEqual(captured[0][1], bridge.guarded_proxy(route()))
+        self.assertTrue(committed.is_set())
+
+    def test_first_link_can_verify_a_known_official_uid_and_recover_account_commit(self):
+        pending = self.pending("official-uid")
+        response = {"code": 0, "data": {"accessToken": token(), "refreshToken": "synthetic-refresh"}}
+        persist = self.bridge.persist
+        def interrupt(row):
+            if row["state"] == "ready": raise OSError("simulated acknowledgement loss")
+            return persist(row)
+        with patch.object(accounts, "http_json", return_value=response), patch.object(accounts, "fetch_account_profile", return_value=("official-uid", "Name")), patch.object(self.bridge, "persist", side_effect=interrupt):
+            with self.assertRaises(OSError): self.bridge.poll(pending["id"])
+        self.assertEqual(len(self.pool.accounts), 1)
+        self.bridge.db.close(); self.pool = accounts.AccountPool(self.pool.dir); self.pool.load(); self.bridge = bridge.Bridge(self.pool)
+        with patch.object(accounts, "http_json") as network:
+            result = self.bridge.poll(pending["id"]); network.assert_not_called()
+        self.assertEqual(result["status"], "ready")
+        self.assertNotIn("accessToken", json.dumps(result))
+        self.assertNotIn("candidate", json.loads(self.bridge.stored(pending["id"])["payload"]))
+
+    def test_failed_file_save_never_commits_ready(self):
+        pending = self.pending()
+        response = {"code": 0, "data": {"accessToken": token(), "refreshToken": "synthetic-refresh"}}
+        with patch.object(accounts, "http_json", return_value=response), patch.object(accounts, "fetch_account_profile", return_value=("official-uid", "Name")), patch.object(accounts.Account, "save", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError): self.bridge.poll(pending["id"])
+        self.assertEqual(self.bridge.stored(pending["id"])["state"], "candidate")
+        self.assertEqual(self.pool.accounts, [])
+
+    def test_international_automated_chat_is_disabled_by_default(self):
+        with patch.dict(os.environ, {"WB_INTERNATIONAL_DAILY_CHAT": "0"}):
+            acc = accounts.Account({"uid": "u", "realm": "intl", "accessToken": token()})
+            with patch.object(accounts, "http_json") as network:
+                self.assertFalse(acc.can_daily_chat()); self.assertFalse(acc.daily_chat()["ok"])
+                self.assertFalse(acc.daily_chat_web()["ok"]); network.assert_not_called()
+
+if __name__ == "__main__": unittest.main()

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WorkBuddy 用量看板</title>
+<link rel="icon" href="__WB_BASE__/favicon.svg" type="image/svg+xml">
 <style>
 :root{
   --bg:#f8fafc; --panel:#ffffff; --panel2:#f1f5f9; --panel3:#e2e8f0;
@@ -5600,6 +5601,7 @@ const GETJSON_INFLIGHT = new Map();
 // 每一轮轮询都陪它一起等。超过这个时长就把登记项视为已死，放行新请求。
 const GETJSON_STALE_MS = 60000;
 async function getJSON(url, opts){
+  url = ('__WB_BASE__'.startsWith('/') ? '__WB_BASE__' : '') + url;
   // cache 模式分两档，按"响应体在服务端是否有一份 TTL 缓存"来选：
   //
   //  - 默认 no-store：不落盘、每次整份重取。登录轮询（/accounts/login/poll）、
@@ -5635,6 +5637,7 @@ async function getJSON(url, opts){
 // no-store，免得"顺手加上"之后把必须每次都新的响应也变成可缓存校验的。
 const POLL_READ = {revalidate: true};
 async function postJSON(url, body){
+  url = ('__WB_BASE__'.startsWith('/') ? '__WB_BASE__' : '') + url;
   const r = await fetch(url, {method:'POST', headers: authHeaders({'Content-Type':'application/json'}),
                               body: JSON.stringify(body || {})});
   const t = await r.text();
@@ -6696,7 +6699,7 @@ async function downloadExport(query, fallbackLabel){
   // Fetch through the authorised JSON API and save the blob client-side.
   // A plain <a href> would not carry the X-Panel-Token header, so a
   // password-only session would be rejected.
-  const r = await fetch('/accounts/export' + (query || ''), {cache:'no-store', headers: authHeaders()});
+  const r = await fetch(('__WB_BASE__'.startsWith('/') ? '__WB_BASE__' : '') + '/accounts/export' + (query || ''), {cache:'no-store', headers: authHeaders()});
   if(r.status === 401 || r.status === 403){ panelSessionLost(); throw new Error('unauthorized'); }
   if(r.status === 404){
     let msg = '账号不存在';
@@ -7811,7 +7814,7 @@ async function submitPanelLogin(){
   if(!password){ if(msg) msg.textContent = '请输入面板密码'; return; }
   if(msg) msg.textContent = '';
   try {
-    const r = await fetch('/panel/login', {
+    const r = await fetch(('__WB_BASE__'.startsWith('/') ? '__WB_BASE__' : '') + '/panel/login', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({password: password})
@@ -7847,7 +7850,7 @@ async function panelLogout(){
 
 async function bootPanel(){
   try {
-    const r = await fetch('/panel/status', {cache: 'no-store', headers: authHeaders()});
+    const r = await fetch(('__WB_BASE__'.startsWith('/') ? '__WB_BASE__' : '') + '/panel/status', {cache: 'no-store', headers: authHeaders()});
     PANEL_STATUS = await r.json().catch(() => ({}));
   } catch(e) { PANEL_STATUS = {}; }
   const hint = document.getElementById('panelDefaultHint');
@@ -10119,7 +10122,7 @@ function renderAgentConnForm(){
   const baseInput = document.getElementById('agentBaseUrl');
   if(baseInput && !baseInput.dataset.touched){
     const def = (AGENTS_DATA && AGENTS_DATA.gateway && AGENTS_DATA.gateway.base_url)
-      || (location.origin + '/v1');
+      || (location.origin + ('__WB_BASE__'.startsWith('/') ? '__WB_BASE__' : '') + '/v1');
     baseInput.value = def;
   }
   const keySel = document.getElementById('agentKeySelect');
@@ -10152,7 +10155,7 @@ function renderAgentConnForm(){
 }
 
 function renderAgentManualUrls(){
-  const origin = location.origin;
+  const origin = location.origin + ('__WB_BASE__'.startsWith('/') ? '__WB_BASE__' : '');
   const openAIEl = document.getElementById('agentOpenAIUrl');
   const anthEl = document.getElementById('agentAnthropicUrl');
   if(openAIEl) openAIEl.textContent = origin + '/v1';

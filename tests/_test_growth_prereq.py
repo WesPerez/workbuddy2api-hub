@@ -36,6 +36,9 @@ class FakeAccount(object):
     def fetch_credits(self):
         pass
 
+    def request_snapshot(self, purpose="chat", header_factory=None):
+        return (header_factory() if header_factory else self.headers(purpose)), self.proxy
+
 
 def _task(code, **over):
     t = {"task_code": code, "status": "not_accepted", "current": 0, "target": 1,

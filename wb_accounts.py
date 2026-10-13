@@ -17,6 +17,7 @@ import wb_identity
 import wb_settings
 import wb_upstream_pool
 import wb_webagent
+import wb_bridge
 
 # ---------------------------------------------------------------------------
 # 网页版通道（issue #75 / #59 / #90）
@@ -74,18 +75,19 @@ def fetch_account_profile(account, timeout=15):
     (wrong-account guard).
     """
     origin = web_origin_for(getattr(account, "realm", ""))
-    req = urllib.request.Request(
-        origin + PROFILE_PATH, method="GET",
-        headers={
+    headers, request_proxy = account.request_snapshot(header_factory=lambda: {
             "Authorization": "Bearer " + str(account.access_token or ""),
             "Accept": "application/json, text/plain, */*",
             "x-client-platform": "web",
-            "Origin": WEB_ORIGIN_CN,
-            "Referer": WEB_ORIGIN_CN + "/profile/account-settings",
+            "Origin": origin,
+            "Referer": origin + "/profile/account-settings",
             "User-Agent": WEB_USER_AGENT,
-        },
+        })
+    req = urllib.request.Request(
+        origin + PROFILE_PATH, method="GET",
+        headers=headers,
     )
-    with urlopen(req, timeout=timeout, proxy=getattr(account, "proxy", "")) as resp:
+    with urlopen(req, timeout=timeout, proxy=request_proxy) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     if not isinstance(data, dict):
         raise RuntimeError("profile response is not an object")
@@ -130,6 +132,13 @@ def urlopen(req, timeout=30, proxy=""):
     回退到下面这条原来的路，行为与改动前一致；WB_UPSTREAM_KEEPALIVE=0 时整条
     路径都与改动前相同。
     """
+    if wb_bridge.draining():
+        raise RuntimeError("gateway is draining")
+    if wb_bridge.strict_proxy(proxy):
+        try:
+            return wb_upstream_pool.urlopen(req, timeout=timeout, proxy=proxy)
+        except wb_upstream_pool.PoolBypass:
+            raise RuntimeError("protected proxy cannot use a direct or redirect fallback") from None
     if wb_upstream_pool.enabled():
         try:
             return wb_upstream_pool.urlopen(req, timeout=timeout, proxy=proxy)
@@ -501,6 +510,10 @@ class Account(object):
             self.enterprise_id = self.jwt_enterprise_id(token)
         self.added_at = data.get("addedAt") or time.time()
         self.source = str(data.get("source") or "oauth")
+        self.bridge_ref = str(data.get("bridgeRef") or "")
+        self.bridge_revision = str(data.get("bridgeRevision") or "")
+        self.bridge_task = str(data.get("bridgeTask") or "")
+        self.bridge_route = data.get("bridgeRoute") or {}
         self.proxy_slot = str(data.get("proxySlot") or "").strip()
         self.proxy_legacy = str(data.get("proxy") or "").strip()
         # Runtime-resolved value; recomputed by AccountPool.apply_proxy_slots().
@@ -636,6 +649,24 @@ class Account(object):
         # Keep it separate from _refresh_lock, which spans network requests.
         self._throttle_lock = threading.Lock()
 
+    @property
+    def proxy(self):
+        if self.bridge_ref or self.source == "account-hub":
+            if not self.bridge_ref:
+                raise ValueError("managed identity has no source reference; reconnect from Account Hub")
+            return wb_bridge.guarded_proxy(self.bridge_route)
+        return self._proxy
+
+    @proxy.setter
+    def proxy(self, value):
+        self._proxy = value
+
+    def request_snapshot(self, purpose="chat", header_factory=None):
+        """Read one credential generation and its route before an HTTP call."""
+        with self._refresh_lock:
+            headers = header_factory() if header_factory else self.headers(purpose)
+            return headers, self.proxy
+
     def to_dict(self):
         """Full view of the account, including live state.
 
@@ -656,6 +687,10 @@ class Account(object):
             "expiresAt": self.expires_at,
             "addedAt": self.added_at,
             "source": self.source,
+            "bridgeRef": self.bridge_ref,
+            "bridgeRevision": self.bridge_revision,
+            "bridgeTask": self.bridge_task,
+            "bridgeRoute": self.bridge_route,
             "proxySlot": self.proxy_slot,
             "proxy": self.proxy_legacy,
             "enabled": self.enabled,
@@ -711,7 +746,8 @@ class Account(object):
             "note": self.note,
             "source": self.source,
             "proxySlot": self.proxy_slot,
-            "proxy": self.proxy,
+            "proxy": self.bridge_route.get("proxy", {}).get("server", "") if self.bridge_ref else self.proxy,
+            "loginSource": self.bridge_ref or None,
             "expiresAt": exp,
             "expiresIn": _human_delta(exp - time.time()) if exp else None,
             "hasRefreshToken": bool(self.refresh_token),
@@ -748,7 +784,7 @@ class Account(object):
             "lastDailyChat": self.last_daily_chat,
             "lastActivityReport": self.last_activity_report,
             "canCheckin": self.realm == "cn" and not self.is_enterprise(),
-            "canDailyChat": self.realm == "intl",
+            "canDailyChat": self.realm == "intl" and wb_bridge.daily_enabled(),
             "canReportActivity": self.realm == "cn" and not self.is_enterprise(),
             "machineId": derive_id(self.uid, "machine"),
             "sessionId": derive_id(self.uid, "session"),
@@ -776,6 +812,9 @@ class Account(object):
                     payload.pop(field, None)
                 with open(tmp, "w", encoding="utf-8") as fh:
                     json.dump(payload, fh, ensure_ascii=False, indent=2)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.chmod(tmp, 0o600)
                 os.replace(tmp, path)
             except Exception:
                 try:
@@ -1260,6 +1299,8 @@ class Account(object):
             self._set_last_error("refresh returned no token (%s)" % payload.get("msg"))
             return False
         self.access_token = token
+        if self.bridge_ref:
+            self.bridge_revision = str(uuid.uuid4())
         self.refresh_token = data.get("refreshToken") or self.refresh_token
         self.expires_at = jwt_exp(token) or self.expires_at
         with self._throttle_lock:
@@ -1280,6 +1321,8 @@ class Account(object):
         return not str(self.last_checkin).startswith(today_str)
 
     def can_daily_chat(self):
+        if not wb_bridge.daily_enabled() or not self.enabled:
+            return False
         if self.realm != "intl":
             return False
         if not self.last_daily_chat:
@@ -1324,6 +1367,8 @@ class Account(object):
         trigger 只用于活动历史的来源标注；trigger=None 表示这一步算在外层尝试
         里、不单独记一行 —— daily_chat() 内部就是这么调的。
         """
+        if not wb_bridge.daily_enabled() or not self.enabled:
+            return {"ok": False, "error": "automated international activity is disabled"}
         if self.realm != "intl":
             return {"ok": False, "error": "web daily chat is only for international accounts"}
         res = self._daily_chat_web_upstream(prompt)
@@ -1339,12 +1384,14 @@ class Account(object):
             "conversationOrigin": "workbuddy-app",
             "plugins": [{"name": "weixinpay", "marketplace": "codebuddy-builtin"}],
         }
+        snapshot = self.request_snapshot(header_factory=self.web_headers)
+        headers, request_proxy = snapshot
         req = urllib.request.Request(
             WEB_CONVERSATIONS_URL,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers=self.web_headers(), method="POST")
+            headers=headers, method="POST")
         try:
-            with urlopen(req, timeout=30, proxy=self.proxy) as resp:
+            with urlopen(req, timeout=30, proxy=request_proxy) as resp:
                 payload = json.loads(resp.read().decode("utf-8", "replace") or "{}")
         except urllib.error.HTTPError as exc:
             try:
@@ -1363,7 +1410,7 @@ class Account(object):
 
         # 建完只是排队：接上沙箱、请求这一轮，它才会真的跑起来（issue #90）。
         try:
-            session = (self._web_conversation_get(conversation, "/session") or {}).get("data") or {}
+            session = (self._web_conversation_get(conversation, "/session", snapshot=snapshot) or {}).get("data") or {}
         except Exception as exc:
             return {"ok": False, "conversation": conversation,
                     "error": "session 查询失败: %s" % exc}
@@ -1378,25 +1425,26 @@ class Account(object):
         result = wb_webagent.run_turn(
             link, token, session_id, cwd, prompt or DAILY_CHAT_WEB_PROMPT,
             WEB_USER_AGENT,
-            poll_status=lambda: self._web_conversation_status(conversation),
-            wait_seconds=WEB_TURN_TIMEOUT, proxy=self.proxy)
+            poll_status=lambda: self._web_conversation_status(conversation, snapshot=snapshot),
+            wait_seconds=WEB_TURN_TIMEOUT, proxy=request_proxy)
         result["conversation"] = conversation
         if result.get("ok"):
             result["msg"] = "网页通道会话跑完：%d 段输出，%d ms" % (
                 result.get("chunks") or 0, result.get("elapsed_ms") or 0)
         return result
 
-    def _web_conversation_get(self, conversation, suffix=""):
+    def _web_conversation_get(self, conversation, suffix="", snapshot=None):
         """读一条网页端会话（suffix 为空拿会话本身，"/session" 拿沙箱信息）。"""
         url = WEB_CONVERSATIONS_URL + urllib.parse.quote(str(conversation)) + suffix
-        req = urllib.request.Request(url, headers=self.web_headers(), method="GET")
-        with urlopen(req, timeout=30, proxy=self.proxy) as resp:
+        headers, request_proxy = snapshot or self.request_snapshot(header_factory=self.web_headers)
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urlopen(req, timeout=30, proxy=request_proxy) as resp:
             return json.loads(resp.read().decode("utf-8", "replace") or "{}")
 
-    def _web_conversation_status(self, conversation):
+    def _web_conversation_status(self, conversation, snapshot=None):
         """这条会话现在什么状态（completed 就是这一轮真的跑完了）。"""
         try:
-            payload = self._web_conversation_get(conversation)
+            payload = self._web_conversation_get(conversation, snapshot=snapshot)
         except Exception:
             return ""
         data = payload.get("data") if isinstance(payload, dict) else None
@@ -1412,6 +1460,8 @@ class Account(object):
         trigger 只用于活动历史的来源标注；整次尝试记一行，网页通道那一步的结果
         并进同一行的说明里，不再多记一行。
         """
+        if not wb_bridge.daily_enabled() or not self.enabled:
+            return {"ok": False, "error": "automated international activity is disabled"}
         if self.realm != "intl":
             return {"ok": False, "error": "daily chat is only for international accounts"}
         res = self._daily_chat_upstream(web)
@@ -1422,7 +1472,7 @@ class Account(object):
         """每日活跃对话的实际流程；返回形状见 daily_chat。"""
         import wb_proxy
         url = self.chat_base_url() + wb_proxy.CHAT_PATH
-        headers = self.headers("chat")
+        headers, request_proxy = self.request_snapshot("chat")
         body = {
             "model": DAILY_CHAT_MODEL,
             "messages": [{"role": "user", "content": "Hi"}],
@@ -1434,7 +1484,7 @@ class Account(object):
         data = json.dumps(req_body, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
         try:
-            with urlopen(req, timeout=20, proxy=self.proxy) as resp:
+            with urlopen(req, timeout=20, proxy=request_proxy) as resp:
                 _ = resp.read()
             try:
                 self.fetch_credits()
@@ -1491,10 +1541,10 @@ class Account(object):
         """签到的实际请求；返回形状见 checkin。"""
         cfg = get_realm_config("cn")
         url = cfg["billing_upstream"] + CHECKIN_PATH
-        headers = self.headers(purpose="billing")
+        headers, request_proxy = self.request_snapshot(purpose="billing")
         try:
             payload = http_json(url, data=b"{}", method="POST", headers=headers, timeout=15,
-                                proxy=self.proxy)
+                                proxy=request_proxy)
             code = payload.get("code", -1)
             msg = payload.get("msg") or "ok"
             self.last_checkin = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -1642,14 +1692,14 @@ class Account(object):
 
     def _fetch_credits_cn_detailed(self):
         cfg = get_realm_config(self.realm)
-        headers = self.headers(purpose="billing")
+        headers, request_proxy = self.request_snapshot(purpose="billing")
         headers["X-Client-Platform"] = "web"
         base_billing = cfg["billing_upstream"]
 
         # 1. 套餐概览
         summary_url = base_billing + RESOURCE_SUMMARY_PATH
         s_res = http_json(summary_url, data=b"{}", method="POST", headers=headers,
-                          timeout=15, proxy=self.proxy)
+                          timeout=15, proxy=request_proxy)
         if s_res.get("code") != 0:
             return {"ok": False, "error": s_res.get("msg") or f"code {s_res.get('code')}"}
         s_data = s_res.get("data") or {}
@@ -1663,7 +1713,7 @@ class Account(object):
             body = {"PackageCodes": pkg_codes, "PageNumber": 1, "PageSize": 200, "Status": [0]}
             try:
                 f_res = http_json(free_url, data=json.dumps(body).encode(), method="POST",
-                                  headers=headers, timeout=15, proxy=self.proxy)
+                                  headers=headers, timeout=15, proxy=request_proxy)
                 free_accs = (f_res.get("data") or {}).get("Accounts") or []
             except Exception:
                 pass
@@ -1675,7 +1725,7 @@ class Account(object):
             body = {"PackageCodes": pkg_codes, "PageNumber": 1, "PageSize": 200, "Status": [0, 3], "NeedRenewInfo": True}
             try:
                 p_res = http_json(paid_url, data=json.dumps(body).encode(), method="POST",
-                                  headers=headers, timeout=15, proxy=self.proxy)
+                                  headers=headers, timeout=15, proxy=request_proxy)
                 paid_accs = (p_res.get("data") or {}).get("Accounts") or []
             except Exception:
                 pass
@@ -1685,7 +1735,7 @@ class Account(object):
         try:
             checkin_url = cfg.get("chat_upstream", "https://copilot.tencent.com") + CHECKIN_STATUS_PATH
             c_res = http_json(checkin_url, data=b"{}", method="POST", headers=headers,
-                              timeout=10, proxy=self.proxy)
+                              timeout=10, proxy=request_proxy)
             c_data = c_res.get("data") or {}
             if c_data:
                 checkin_info = {
@@ -1777,10 +1827,10 @@ class Account(object):
             "PackageEndTimeRangeEnd": "2036-01-01 00:00:00",
         }
         url = cfg["billing_upstream"] + GET_RESOURCE_PATH
-        headers = self.headers(purpose="billing")
+        headers, request_proxy = self.request_snapshot(purpose="billing")
         try:
             res = http_json(url, data=json.dumps(body).encode(), method="POST", headers=headers,
-                            timeout=30, proxy=self.proxy)
+                            timeout=30, proxy=request_proxy)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
         data = res.get("data", {}).get("Response", {}).get("Data", {})
@@ -1859,11 +1909,11 @@ class Account(object):
         """
         cfg = get_realm_config(self.realm)
         url = cfg["billing_upstream"] + ENTERPRISE_USAGE_PATH
-        headers = self.headers(purpose="billing")
+        headers, request_proxy = self.request_snapshot(purpose="billing")
         headers["X-Client-Platform"] = "web"
         try:
             res = http_json(url, data=b"{}", method="POST", headers=headers,
-                            timeout=15, proxy=self.proxy)
+                            timeout=15, proxy=request_proxy)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
         data = res.get("data") or {}
@@ -2459,6 +2509,8 @@ class AccountPool(object):
         with self._lock:
             existing = self.get(account.uid)
             if existing is not None:
+                if existing.bridge_ref:
+                    raise ValueError("This identity is managed by Account Hub; reconnect from its source")
                 account.added_at = existing.added_at
                 account.path = existing.path
                 if not account.credits and existing.credits:
@@ -3474,6 +3526,8 @@ def build_export_document(accounts, realm=None, include_secrets=True, uids=None)
         if not include_secrets:
             row.pop("accessToken", None)
             row.pop("refreshToken", None)
+            row.pop("bridgeRoute", None)
+            row.pop("proxy", None)
         rows.append(row)
     return {
         "format": EXPORT_FORMAT,
@@ -3529,6 +3583,17 @@ def normalise_import_row(row, realm=None):
     so a file from either source imports cleanly. Raises ValueError when the
     row carries no usable credential.
     """
+    # Check every supported layer before a format conversion can discard a
+    # managed source marker. Its lease and identity must be reconnected by the
+    # lifecycle owner, never restored as an unguarded native account.
+    for layer in (row, row.get("auth"), row.get("account")):
+        if isinstance(layer, dict) and (layer.get("source") == "account-hub"
+                or any(key in layer for key in ("bridgeRef", "bridgeRoute", "bridgeTask", "bridgeRevision",
+                                                "bridge_ref", "bridge_route"))):
+            # Native exports include empty bridge fields for ordinary accounts.
+            if layer.get("source") == "account-hub" or any(layer.get(key) for key in
+                    ("bridgeRef", "bridgeRoute", "bridgeTask", "bridgeRevision", "bridge_ref", "bridge_route")):
+                raise ValueError("Managed accounts must reconnect from Account Hub")
     # cockpit tools exports a bare array of snake_case OAuth rows. Map it onto
     # the flat shape the rest of this function already understands; expires_at
     # is milliseconds, which normalize_epoch() below converts to seconds.

@@ -1,0 +1,9 @@
+[Unit]
+Description=Deploy verified WorkBuddy Hub releases
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -B /opt/workbuddy-hub/updater/deploy/update.py --apply
+UMask=0077
+TimeoutStartSec=900

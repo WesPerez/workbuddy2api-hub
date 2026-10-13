@@ -61,3 +61,6 @@ wb_updates.py
 wb_upstream_pool.py
 wb_webagent.py
 wb_webtools.py
+
+wb_bridge.py
+favicon.svg

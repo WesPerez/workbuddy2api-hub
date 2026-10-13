@@ -1,0 +1,1 @@
+{"root":"/opt/workbuddy-hub","unit":"workbuddy-hub.service","data":"/var/lib/workbuddy-hub","health":"http://127.0.0.1:17622/healthz"}

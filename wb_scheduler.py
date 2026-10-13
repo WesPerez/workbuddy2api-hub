@@ -10,6 +10,7 @@
 import threading
 import time
 import wb_tasks
+import wb_bridge
 from wb_tasks import do_cat_travel
 
 
@@ -70,9 +71,11 @@ class Scheduler:
 
     def _run_loop(self):
         # 启动后先休眠 10 秒等待主服务就绪，然后执行初次检查
-        time.sleep(10)
+        if self._stop_event.wait(10):
+            return
         try:
-            self._execute_cycle("启动初次初始化巡检")
+            if self.enabled and not wb_bridge.draining():
+                self._execute_cycle("启动初次初始化巡检")
         except Exception as exc:
             self.log(f"初次巡检异常: {exc}")
 
@@ -120,6 +123,8 @@ class Scheduler:
         return {"ok": True, "msg": "已触发后台调度执行"}
 
     def _execute_cycle(self, trigger_reason="周期巡检"):
+        if not self.enabled or wb_bridge.draining():
+            return
         if not self._run_lock.acquire(blocking=False):
             self.log(f"跳过本次巡检 ({trigger_reason})：上一轮仍在执行")
             return
@@ -142,6 +147,8 @@ class Scheduler:
         daily_chat_count = 0
 
         for acc in list(self.pool.accounts):
+            if not acc.enabled or wb_bridge.draining():
+                continue
             uid8 = acc.uid[:8] if acc.uid else "?"
             # 1. 检查 Token 剩余寿命 (小于 2 小时自动刷新保活)
             exp = acc.expires_at or 0
@@ -198,7 +205,7 @@ class Scheduler:
                     time.sleep(1.0)
 
             # 3. 如果是国际版账号，检查每日活跃对话 (送 30/50 积分福利)
-            if acc.realm == "intl":
+            if acc.realm == "intl" and wb_bridge.daily_enabled():
                 if acc.can_daily_chat():
                     self.log(f"检测到国际版账号 [{uid8}] 今日尚未活跃，执行每日活跃打卡对话...")
                     res = acc.daily_chat(trigger="scheduler")

@@ -57,6 +57,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import wb_bridge
 import wb_accounts
 import wb_activity
 import wb_atrest
@@ -10452,10 +10453,10 @@ def fetch_remote_product_config(realm):
         uas.append(cfg["billing_ua"])
     last = None
     for ua in uas:
-        headers = remote_config_headers(account, realm, ua)
+        headers, request_proxy = account.request_snapshot(header_factory=lambda: remote_config_headers(account, realm, ua))
         req = urllib.request.Request(url, headers=headers, method="GET")
         try:
-            with wb_accounts.urlopen(req, timeout=10, proxy=account.proxy) as resp:
+            with wb_accounts.urlopen(req, timeout=10, proxy=request_proxy) as resp:
                 payload = json.loads(resp.read().decode("utf-8", "replace"))
         except Exception as exc:
             last = exc
@@ -10530,9 +10531,10 @@ def fetch_endpoint_models():
         log("model discovery skipped: no usable account")
         cached = _models_cache.get("intl", {}).get("data")
         return [m for m, _ in (cached or [])]
-    req = urllib.request.Request(UPSTREAM + MODELS_PATH, method="GET", headers=account.headers())
+    headers, request_proxy = account.request_snapshot()
+    req = urllib.request.Request(UPSTREAM + MODELS_PATH, method="GET", headers=headers)
     try:
-        with wb_accounts.urlopen(req, timeout=30, proxy=account.proxy) as resp:
+        with wb_accounts.urlopen(req, timeout=30, proxy=request_proxy) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except Exception as exc:
         log(f"model discovery failed: {exc}")
@@ -12542,18 +12544,19 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         else:
             attempt_body = upstream_body
         attempt_data = json.dumps(attempt_body, ensure_ascii=False).encode("utf-8")
+        headers, request_proxy = account.request_snapshot()
         req = urllib.request.Request(chat_url, data=attempt_data, method="POST",
-                                     headers=account.headers(purpose="chat"))
+                                     headers=headers)
         try:
             resp = wb_accounts.urlopen(req, timeout=header_timeout,
-                                       proxy=account.proxy)
+                                       proxy=request_proxy)
             _apply_stream_idle_timeout(resp, idle_timeout)
             account.note_success(model=model)
             if egress_backoff:
                 # This outbound path just served a request, so its transient
                 # streak is over (same rule as the account's note_success).
                 wb_egress.note_success(
-                    wb_upstream_pool.egress_key(chat_url, account.proxy))
+                    wb_upstream_pool.egress_key(chat_url, request_proxy))
             reset_switch_counter(account, model)
             # The third element is the reasoning effort this request ran at: the
             # body is rebuilt per attempt, but the effort is a property of the
@@ -12701,7 +12704,7 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                     # seconds (issue #271). 500 stays on the account - it can be
                     # a real fault tied to this credential and needs another look
                     # before it is moved off the breaker.
-                    wait = charge_egress(chat_url, account.proxy)
+                    wait = charge_egress(chat_url, request_proxy)
                     log("upstream %s for '%s', backing off the egress %.1fs"
                         % (exc.code, model, wait))
                     if session_key and POOL:
@@ -12727,7 +12730,7 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                     # charge the egress and back off for seconds (issue #271).
                     # The account's fails/degrade counters are left alone, so a
                     # few seconds of flakiness no longer parks healthy accounts.
-                    wait = charge_egress(chat_url, account.proxy)
+                    wait = charge_egress(chat_url, request_proxy)
                     log("account %s: upstream connection hiccup for '%s' (%s), "
                         "backing off the egress %.1fs"
                         % (account.uid[:8], model, type(exc).__name__, wait))
@@ -15748,6 +15751,8 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
+        if wb_bridge.dispatch(self, sys.modules[__name__]):
+            return
         # The standalone configurator, for clients on machines that do not run
         # the gateway. Served before the panel gate and deliberately without a
         # session: the machines that need it are exactly the ones that cannot
@@ -16231,6 +16236,8 @@ class Handler(BaseHTTPRequestHandler):
         # The static file carries a placeholder; replace it with the instance
         # default so the first paint already uses the right language.
         language = wb_settings.ui_language(ACCOUNTS_DIR)
+        public_base = wb_bridge.public_base()
+        body = body.replace(b'__WB_BASE__', public_base.encode('ascii'))
         body = body.replace(
             b'data-ui-language="__WB_UI_LANGUAGE__"',
             ('data-ui-language="%s"' % language).encode("utf-8"),
@@ -16251,7 +16258,7 @@ class Handler(BaseHTTPRequestHandler):
             st = os.stat(DASHBOARD_HTML)
             # 强校验符（不带 W/ 前缀）：响应是「文件字节 + 本次语言」的精确副本，
             # tag 变 ⇔ 字节变。
-            etag = '"%x-%x-%s"' % (st.st_mtime_ns, st.st_size, language)
+            etag = '"%x-%x-%s-%s"' % (st.st_mtime_ns, st.st_size, language, hashlib.sha256(public_base.encode()).hexdigest()[:8])
         except Exception:
             # stat 取不到（或时间戳无法表示）不是致命错误：退化为一律按普通
             # 200 处理，只是这一次没有条件请求支持，绝不让面板页本身打不开。
@@ -17689,13 +17696,14 @@ class Handler(BaseHTTPRequestHandler):
         }
         forwarded = build_upstream_body(test_body)
         body = json.dumps(forwarded, ensure_ascii=False).encode("utf-8")
+        headers, request_proxy = account.request_snapshot()
         req = urllib.request.Request(
             chat_url, data=body, method="POST",
-            headers=account.headers(purpose="chat")
+            headers=headers
         )
         t0 = time.time()
         try:
-            with wb_accounts.urlopen(req, timeout=30, proxy=account.proxy) as resp:
+            with wb_accounts.urlopen(req, timeout=30, proxy=request_proxy) as resp:
                 chat_obj = aggregate_stream(resp, test_model, None)
                 wall_ms = int((time.time() - t0) * 1000)
                 choices = chat_obj.get("choices") or []
@@ -18245,6 +18253,8 @@ class Handler(BaseHTTPRequestHandler):
         return
 
     def do_POST(self):
+        if wb_bridge.dispatch(self, sys.modules[__name__]):
+            return
         path = self.path.split("?")[0]
         if path == "/settings/save":
             if not self._panel_ok():
@@ -18338,6 +18348,8 @@ class Handler(BaseHTTPRequestHandler):
                              stream=payload.get("stream"), key=self._key_id())
                 return self._anthropic_error(503, message, "overloaded_error")
             try:
+                if wb_bridge.draining():
+                    return self._anthropic_error(503, "gateway is draining", "overloaded_error")
                 return self._handle_messages(payload)
             finally:
                 _chat_slots.release()
@@ -18348,6 +18360,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(503, "gateway is at its concurrent chat limit "
                                     "(%d in flight); retry shortly" % MAX_CONCURRENT_CHAT)
         try:
+            if wb_bridge.draining():
+                return self._error(503, "gateway is draining")
             return self._dispatch_chat_post(path, payload)
         finally:
             _chat_slots.release()
@@ -18624,7 +18638,7 @@ def _parse_cli_args():
                     help="where the per-account credential files live (default: ./accounts)")
     ap.add_argument("--import-desktop", action="store_true",
                     help="import the desktop app credential as an account, then exit")
-    ap.add_argument("--panel-password", default=None,
+    ap.add_argument("--panel-password", default=os.environ.get("WB_PANEL_PASSWORD"),
                     help="set the web panel password on startup (default: admin)")
     args = ap.parse_args()
     return args
@@ -18827,14 +18841,14 @@ def _log_startup_summary(args, api_key_generated):
             print("    API       : http://%s:%s/v1" % (ip, args.port))
             print("    Dashboard : http://%s:%s/" % (ip, args.port))
         print()
-        print("    API Key   : %s" % API_KEY)
+        print("    API Key   : configured (hidden)")
         if api_key_generated:
             print("                (newly generated & saved to accounts/settings.json)")
         else:
             print("                (reused from accounts/settings.json)")
         print()
         print("    Open the dashboard (key already included):")
-        print("      http://%s:%s/?key=%s" % (ips[0], args.port, API_KEY))
+        print("      http://%s:%s/" % (ips[0], args.port))
         print()
         print("    Clients: Base URL = the API address above, then paste the key.")
         print()

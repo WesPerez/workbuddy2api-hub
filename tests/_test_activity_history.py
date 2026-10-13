@@ -22,6 +22,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
 _TMP = isolated_data_dirs("wb-activity-")
 
+os.environ["WB_INTERNATIONAL_DAILY_CHAT"] = "1"
+
 import wb_accounts
 import wb_activity
 import wb_proxy
