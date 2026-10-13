@@ -1,6 +1,6 @@
 # WorkBuddy 生态调研结论（2026-10-13）
 
-本目录保存 2026-10-13 对 WorkBuddy / CodeBuddy 反代与账号管理生态的只读调研，原先只存在于临时目录，现归档进仓库，供后续实现与复核引用。
+本目录保存 2026-10-13 最初选型时的上游源码调查，供复核项目取舍。正文中的缺口、默认配置和未确认项属于当时的上游快照，早于本仓库的 Account Hub 接入改动，不能当作当前生产行为。
 
 ## 文件
 
@@ -9,16 +9,14 @@
 - `final-integration-gaps.md`：把 panel/manager/MetAPI 接入本 hub 时的缺口清单与证据。
 - `candidates/`：候选项目的对接要点摘要。
 
-## 与生产落地直接相关的结论
+## 本仓库已经落实的处理
 
-1. **hub 自身没有账号级出口。** `_route_accounts_login_start` 只接受 `realm`/`platform`，`start_login` 无 proxy 参数，profile 拉取直接用 `urllib.request.urlopen`。因此“每个 WorkBuddy 账号一个独立出口”不能由 hub 内部实现，必须由前置代理层提供——生产上由 account-hub 的 Resin 出口租约（`hub-<id>-<hash>` 身份键）承担，hub 只负责凭据与刷新。
-2. **hub 的面板路由没有可替代的令牌接口。** `/accounts*` 全部走 `_is_panel_route` 且必须是内存态面板会话（`X-Panel-Token`），重启即失效；不存在 `wbt_` 类长期令牌。自动化必须通过浏览器会话建立，不能靠静态令牌。
-3. **导入契约是宽容的。** 导出文档、裸数组、单账号对象、桌面端凭据、cockpit snake_case 行都能被 `_coerce_account_rows` / `normalise_import_row` 归一化；`access_token`/`refresh_token`/`expires_at`（毫秒）会被映射到扁平结构。
-4. **导出默认包含明文机密。** HTTP 侧 `/accounts/export` 默认 `secrets=1`，必须显式 `?secrets=0` 才脱敏。任何导出物都按机密处理，不进入仓库与工单。
-5. **默认面板口令是 `admin`。** 校验逻辑不强制改密，仅通过 `panel_password_default` 透出布尔量提示。部署后必须立刻改密。
-6. **Cookie/CSRF、会话 TTL 与并发上限尚未逐行核验**，属于已知未确认项。
-7. **续期写入存在竞态窗口。** manager 的 renew 从读快照到 `os.replace` 之间隔着一次网络往返，Go 侧保活可在此期间完成一次“选号→刷新→写回”。因此委派账号的凭据只能由单一所有者刷新，MetAPI 侧只允许通过官方会话续期交付更新，不得手工 `PUT` 覆盖 ``密码/代理``。
+1. **每个受管账号在 Hub 内保存并使用独立出口。** `wb_bridge.py` 的 `bridgeRoute` 固定平台、节点、公网 IP 与租约代次；Hub 的上游请求使用该账号的受管代理。Account Hub 负责 GitHub 身份和授权时的出口归属，不能把 SUB2 到 Hub 的单一下游连接当成各账号的上游出口。
+2. **接入使用正式委托接口。** Account Hub 的国际版授权结果交给 Hub 保存；面板会话与服务间桥接鉴权是不同入口。历史快照中“只有面板会话”的限制不适用于新增的桥接接口。
+3. **令牌只有一个写入者。** Hub 独占 WorkBuddy access/refresh token 的保存和刷新；Account Hub 保存委托引用。资料验收复用运行账号及已保存的 route，不另建刷新池。
+4. **错误分层处理。** 先查平台成员、租约代次和实际 IP，再判断浏览器挑战与上游身份；连接失败不自动清 Cookie，不直连回落。订阅移除仍在使用的节点时，由会话保留源保护原路由。
+5. **模型接入与每日积分是两项验收。** 6945、1223、2548、3132 的国际版资料和 SUB2 模型链路已验收；每日自动对话保持关闭，本次没有验收每日积分到账。
 
 ## 使用约束
 
-本目录内容为调研证据，不构成对上游项目的运行时依赖。任何实现变更以 `mine` 分支代码与 `docs/account-hub-bridge.md` 为准。
+本目录内容不构成运行时依赖。当前操作入口、凭据归属与验收要求见 [接入运行约定](../account-hub-bridge.md)，实现以 `mine` 分支为准。历史候选的默认口令、导出示例或临时命令不用于当前部署；凭据、浏览器状态与完整导出不入 Git。
