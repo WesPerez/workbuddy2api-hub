@@ -3029,6 +3029,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
         <thead>
           <tr>
             <th style="text-align:left;width:220px">模型 ID</th>
+            <th style="text-align:left;width:170px">验证状态</th>
             <th style="text-align:center;width:140px">消费倍率 / 优惠</th>
             <th style="text-align:center;width:160px">模型能力</th>
             <th style="text-align:center;width:110px">上下文窗口</th>
@@ -3039,6 +3040,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
         <tbody></tbody>
       </table>
     </div>
+    <div id="excludedModels" style="font-size:12px;margin-top:12px"></div>
   </section>
 
   </div><!-- /pageGateway -->
@@ -4374,6 +4376,7 @@ window.ACTIVE_GATEWAY_REALM = "intl";
 window.VIEW_REALM = "intl";
 window.REALM_FILTER = "all";
 window.MODELS_DATA = [];
+window.EXCLUDED_MODELS_DATA = [];
 window.ACCOUNTS = [];
 
 function updateUI(){
@@ -4551,28 +4554,77 @@ async function initRealm(){
   window.updateUI();
 }
 
+let modelsLoadPromise = null;
+let modelsLoadRealm = null;
 async function loadModels(){
+  const realm = window.VIEW_REALM;
+  if(modelsLoadPromise && modelsLoadRealm === realm) return modelsLoadPromise;
+  modelsLoadRealm = realm;
+  const pending = fetchModelsForView(realm);
+  modelsLoadPromise = pending;
+  try { await pending; }
+  finally { if(modelsLoadPromise === pending) modelsLoadPromise = null; }
+}
+
+async function fetchModelsForView(realm){
   try{
-    const r = await getJSON('/v1/models?realm=' + encodeURIComponent(window.VIEW_REALM));
+    const r = await getJSON('/v1/models?realm=' + encodeURIComponent(realm));
+    if(realm !== window.VIEW_REALM) return;
     MODELS_DATA = r.data || [];
+    EXCLUDED_MODELS_DATA = r.excluded || [];
     const info = r.catalog || {};
     const status = document.getElementById('catalogStatus');
     if(status) status.textContent = (info.stale ? '缓存 / 降级目录' : '上游目录')
       + ' · 最长缓存 5 分钟 · ' + (info.fetchedAt ? new Date(info.fetchedAt * 1000).toLocaleString() : '刷新时间未知')
-      + ' · 目录收录不代表每个账号即时可用；倍率缺失时显示未提供';
+      + ' · 目录 ' + (info.upstreamCount ?? MODELS_DATA.length) + ' 个 / 近 24 小时成功 ' + (info.verifiedCount ?? 0)
+      + ' 个 / 暂时排除 ' + EXCLUDED_MODELS_DATA.length + ' 个'
+      + ' · 本页每 30 秒更新；目录收录不代表每个账号即时可用；倍率缺失时显示未提供';
     renderAvailableModels();
+    renderExcludedModels();
   }catch(e){
+    const status = document.getElementById('catalogStatus');
+    if(status && realm === window.VIEW_REALM) status.textContent = '模型清单刷新失败，当前显示上次结果';
     console.error('loadModels error:', e);
   }
+}
+
+function modelAvailabilityCell(m){
+  const a = m.availability || {};
+  const labels = {available: '近期请求成功', unverified: '尚未验证', unavailable: '上游不可用', degraded: '待复核'};
+  const reasons = {upstream_service_not_found: '上游返回模型服务不存在',
+    empty_upstream_response: '上游返回空响应', zero_usage_unverified: '历史零用量响应，需复测确认'};
+  const at = a.checkedAt || a.lastCheckedAt;
+  const when = at ? new Date(at * 1000).toLocaleString() : '';
+  const detail = [reasons[a.reason] || '', when, a.failedAccounts ? '部分账号有失败记录' : ''].filter(Boolean).join(' · ');
+  return '<span class="badge ' + (a.status === 'available' ? 'ok' : '') + '" title="' + esc(detail) + '">'
+    + esc(labels[a.status] || '尚未验证') + '</span>'
+    + (when ? '<div style="font-size:10px;color:var(--dim);margin-top:3px">' + esc(when) + '</div>' : '');
+}
+
+function renderExcludedModels(){
+  const el = document.getElementById('excludedModels');
+  if(!el) return;
+  el.innerHTML = EXCLUDED_MODELS_DATA.length ? '<b>暂时排除的模型</b> · 正常请求或手动复测成功后自动恢复；复测会产生一次模型请求。'
+    + EXCLUDED_MODELS_DATA.map((m, i) => '<div style="margin-top:8px"><span class="mono">' + esc(m.id)
+      + '</span> ' + modelAvailabilityCell(m) + ' <button class="sec mini" onclick="recheckModel(' + i + ',this)">复测</button></div>').join('') : '';
+}
+
+async function recheckModel(index, btn){
+  const model = EXCLUDED_MODELS_DATA[index];
+  if(!model) return;
+  const realm = (model.availability || {}).realm || window.VIEW_REALM;
+  const account = (window.ACCOUNTS || []).find(a => a.enabled && a.realm === realm && !a.inCooldown);
+  if(!account){ toast('当前区域没有可用于复测的账号', 'warn'); return; }
+  await testAccount(account.uid, btn, model.id);
 }
 
 function renderAvailableModels(){
   const tb = document.querySelector('#modelsTable tbody');
   if(!tb) return;
   const countEm = document.getElementById('availModelCount');
-  if(countEm) countEm.textContent = '(共 ' + MODELS_DATA.length + ' 个)';
+  if(countEm) countEm.textContent = '(可选 ' + MODELS_DATA.length + ' 个)';
   if(!MODELS_DATA.length){
-    tb.innerHTML = '<tr><td colspan="6" class="empty">暂无可用模型</td></tr>';
+    tb.innerHTML = '<tr><td colspan="7" class="empty">暂无可选模型</td></tr>';
     return;
   }
   tb.innerHTML = MODELS_DATA.map(m => {
@@ -4663,6 +4715,7 @@ function renderAvailableModels(){
 
     return '<tr>'
       + '<td style="text-align:left" class="mono" data-label="模型 ID"><b>' + esc(m.id) + '</b></td>'
+      + '<td style="text-align:left" data-label="验证状态">' + modelAvailabilityCell(m) + '</td>'
       + '<td style="text-align:center" data-label="消费倍率">' + credBadge + '</td>'
       + '<td style="text-align:center" data-label="能力">' + capHtml + '</td>'
       + '<td style="text-align:center" data-label="上下文">' + ctx + '</td>'
@@ -6642,20 +6695,21 @@ async function syncProfile(uid, btn){
     if(btn){ btn.disabled = false; btn.textContent = '同步昵称'; }
   }
 }
-async function testAccount(uid, btn){
+async function testAccount(uid, btn, model){
+  const label = btn ? btn.textContent : '';
   if(btn){ btn.disabled = true; btn.textContent = '测试中...'; }
   try{
-    const r = await postJSON('/accounts/test', {uid: uid});
+    const r = await postJSON('/accounts/test', {uid: uid, ...(model ? {model} : {})});
     if(r.ok){
       toast('测试通过 (' + r.elapsed_ms + 'ms) [' + r.model + ']: ' + (r.reply || '正常'), 'ok');
     } else {
       toast('测试失败: ' + (r.error || r.status || '异常'), 'bad');
     }
-    await loadAccounts();
+    await Promise.all([loadAccounts(), loadModels()]);
   }catch(e){
     toast('测试请求失败: ' + e.message, 'bad');
   }finally{
-    if(btn){ btn.disabled = false; btn.textContent = '测试'; }
+    if(btn){ btn.disabled = false; btn.textContent = label || '测试'; }
   }
 }
 async function refreshAccounts(btn){
@@ -7915,6 +7969,7 @@ async function startDashboard(){
     setInterval(() => { if(!document.hidden){ refresh(); applyAllTableSorts(); } }, 5000),
     setInterval(() => { if(!document.hidden) loadSchedulerStatus(); }, 30000),
     setInterval(() => { if(!document.hidden) loadAccounts(); }, 15000),
+    setInterval(() => { if(!document.hidden && currentMainTab === 'gateway') loadModels(); }, 30000),
   ];
   if(!visHookInstalled){
     visHookInstalled = true;
@@ -7925,6 +7980,7 @@ async function startDashboard(){
       refresh();
       loadAccounts();
       loadSchedulerStatus();
+      if(currentMainTab === 'gateway') loadModels();
       if(currentMainTab === 'analytics'){ loadAnalytics(); loadAnalyticsMatrix(); }
       if(currentMainTab === 'logs' && logAutoRefresh) fetchNewLogs(false);
     });
@@ -10763,7 +10819,7 @@ async function loadAnalyticsMatrix(){
       needModels ? getJSON('/v1/models?realm=all').catch(() => null) : Promise.resolve(null),
     ]);
     if(models && models.data){
-      MATRIX_MODELS = new Set(models.data.map(m => m.id));
+      MATRIX_MODELS = new Set([...models.data, ...(models.excluded || [])].map(m => m.id));
       matrixModelsAt = Date.now();
     }
     cachedMatrixData = { usage: usage, perf: perf };

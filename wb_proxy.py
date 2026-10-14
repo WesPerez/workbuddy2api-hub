@@ -676,7 +676,7 @@ def _best_cached_tokens(usage):
 
 
 def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_ms=None, fp=None,
-                account=None, outcome="completed", key=None, effort=None):
+                account=None, outcome="completed", key=None, effort=None, response_validated=False):
     """Record one finished request as exactly one JSONL row.
 
     A request without a usage block still gets a row (flagged usage_missing):
@@ -712,6 +712,8 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
     }
     if usage_missing:
         row["usage_missing"] = True
+    if response_validated:
+        row["response_validated"] = True
     row.update(fields)
     if fp:
         row.update(fp)
@@ -741,6 +743,7 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
         row["cache_hit_pct"] = round(fields.get("cached_tokens", 0) * 100.0
                                      / fields["prompt_tokens"], 1)
     _persist_usage(row, "usage persist failed")
+    remember_model_observation(row)
     try:
         t_tokens = fields.get("total_tokens", 0)
         dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
@@ -817,6 +820,7 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
         row["realm"] = acc.realm if acc else CURRENT_REALM
     row["key"] = key or ""
     _persist_usage(row, "error persist failed")
+    remember_model_observation(row)
     dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
     log(f"request error: model={model}{dur} status={status} msg={str(message)[:180]}", level="ERROR", tag="chat")
     return row
@@ -10153,6 +10157,202 @@ def catalog_status(realm):
     if realm == "all":
         return {r: catalog_status(r) for r in ("intl", "cn")}
     return dict((_models_cache.get(realm) or {}).get("catalog") or {})
+
+
+_model_observation_lock = threading.RLock()
+_model_observation_cache = {"path": None, "rows": {}}
+EMPTY_UPSTREAM_RESPONSE = "empty upstream response"
+
+
+def model_observation(row):
+    """Only semantic results establish model availability; transport faults do not."""
+    if not isinstance(row, dict) or not isinstance(row.get("model"), str) or not row["model"]:
+        return None
+    if not isinstance(row.get("at"), (int, float)):
+        return None
+    message = str(row.get("message") or "")
+    missing_service = (row.get("status") == 400
+        and re.search(r'"code"\s*:\s*"?11102"?', message)
+        and "model [%s] service info not found" % row["model"] in message)
+    if missing_service:
+        status, reason = "unavailable", "upstream_service_not_found"
+    elif EMPTY_UPSTREAM_RESPONSE in message:
+        status, reason = "degraded", "empty_upstream_response"
+    elif row.get("outcome") == "completed" and (row.get("response_validated")
+            or (row.get("completion_tokens") or 0) > 0):
+        status, reason = "available", "successful_request"
+    elif (row.get("outcome") == "completed" and row.get("total_tokens") == 0
+            and row.get("completion_tokens") == 0 and not row.get("usage_missing")):
+        # Older rows did not record whether any output existed. A zero usage
+        # receipt is not proof of an empty reply; keep it pending verification.
+        status, reason = "unverified", "zero_usage_unverified"
+    else:
+        return None
+    return {"status": status, "reason": reason, "checkedAt": row["at"],
+            "account": row.get("account"), "source": "gateway_request"}
+
+
+def _model_observation_key(realm, model, account):
+    return realm + "/" + model + "/" + str(account or "")
+
+
+def _load_model_observations():
+    path = os.path.join(USAGE_DIR, "model-availability.json")
+    if _model_observation_cache["path"] == path:
+        return _model_observation_cache["rows"]
+    rows = {}
+    try:
+        with open(path, encoding="utf-8") as stream:
+            saved = json.load(stream)
+        for key, row in saved.get("observations", {}).items():
+            if (isinstance(row, dict) and row.get("status") in {"available", "unavailable", "degraded", "unverified"}
+                    and isinstance(row.get("checkedAt"), (int, float))):
+                parts = key.split("/", 2)
+                if len(parts) >= 2 and parts[0] in {"intl", "cn"}:
+                    rows[_model_observation_key(parts[0], parts[1], row.get("account"))] = {
+                        k: row.get(k) for k in ("status", "reason", "checkedAt", "account", "source")}
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    # Migrate existing evidence once; a restart must not resurrect a rejected
+    # model. No request bodies, credentials or upstream error strings persist.
+    for line in _tail_lines(USAGE_LOG, 5000):
+        try:
+            event = json.loads(line)
+            observed = model_observation(event)
+            if observed:
+                key = _model_observation_key(row_realm(event), event["model"], event.get("account"))
+                if observed["checkedAt"] >= rows.get(key, {}).get("checkedAt", 0):
+                    rows[key] = observed
+        except (ValueError, TypeError, AttributeError):
+            continue
+    rows = dict(sorted(rows.items(), key=lambda item: item[1]["checkedAt"])[-512:])
+    _model_observation_cache.update({"path": path, "rows": rows, "savedAt": 0})
+    return rows
+
+
+def remember_model_observation(row):
+    observed = model_observation(row)
+    if not observed:
+        return
+    with _model_observation_lock:
+        rows = _load_model_observations()
+        key = _model_observation_key(row_realm(row), row["model"], row.get("account"))
+        previous = rows.get(key, {})
+        if observed["checkedAt"] < previous.get("checkedAt", 0):
+            return
+        rows[key] = observed
+        while len(rows) > 512:
+            del rows[min(rows, key=lambda key: rows[key]["checkedAt"])]
+        path = _model_observation_cache["path"]
+        changed = any(previous.get(k) != observed.get(k) for k in ("status", "reason"))
+        if not changed and time.monotonic() - _model_observation_cache.get("savedAt", 0) < 60:
+            return
+        try:
+            os.makedirs(USAGE_DIR, exist_ok=True)
+            with open(path + ".tmp.json", "w", encoding="utf-8") as stream:
+                json.dump({"version": 1, "observations": rows}, stream)
+            os.replace(path + ".tmp.json", path)
+            _model_observation_cache["savedAt"] = time.monotonic()
+        except OSError:
+            log("model availability receipt could not be saved")
+
+
+def model_listing(realm, entries, now=None):
+    now = time.time() if now is None else now
+    if realm == "all":
+        # A failure in one realm cannot hide a model offered by the other.
+        by_id = {}
+        rank = {"available": 3, "unverified": 2, "degraded": 1, "unavailable": 0}
+        for r in ("intl", "cn"):
+            listed, hidden = model_listing(r, (_models_cache.get(r) or {}).get("data") or [], now)
+            for item in listed + hidden:
+                current = by_id.get(item["id"])
+                if not current or rank[item["availability"]["status"]] > rank[current["availability"]["status"]]:
+                    by_id[item["id"]] = item
+        data = [item for item in by_id.values() if item["availability"]["status"] in {"available", "unverified"}]
+        return data, [item for item in by_id.values() if item["availability"]["status"] in {"unavailable", "degraded"}]
+    data, excluded = [], []
+    with _model_observation_lock:
+        rows = dict(_load_model_observations())
+    enabled = ({a.uid for a in POOL.accounts if a.enabled and a.realm == realm}
+               if POOL is not None and hasattr(POOL, "accounts") else None)
+    for mid, meta in entries:
+        prefix = realm + "/" + mid + "/"
+        samples = [row for key, row in rows.items() if key.startswith(prefix)
+                   and (enabled is None or not row.get("account") or row["account"] in enabled)]
+        successes = [row for row in samples if row["status"] == "available" and now - row["checkedAt"] < 86400]
+        # Keep independent account observations: one account's model rejection
+        # must not erase a recent success on another enabled account.
+        observed = dict(max(successes or samples, key=lambda row: row["checkedAt"])) if samples else {}
+        observed.pop("account", None)
+        observed["realm"] = realm
+        if observed.get("status") in {"unavailable", "degraded"}:
+            observed["recheckAfter"] = observed["checkedAt"] + (600 if observed["status"] == "degraded" else 3600)
+            observed["recheckDue"] = now >= observed["recheckAfter"]
+            # Expiry is permission to recheck, never evidence of recovery.
+        elif not successes:
+            observed = {"status": "unverified", "source": "upstream_catalog", "realm": realm,
+                        "lastCheckedAt": observed.get("checkedAt"), "reason": observed.get("reason")}
+        else:
+            observed["recheckAfter"] = observed["checkedAt"] + 86400
+        observed["successfulAccounts"] = len(successes)
+        observed["failedAccounts"] = sum(row["status"] in {"unavailable", "degraded"} for row in samples)
+        if observed.get("status") in {"unavailable", "degraded"}:
+            excluded.append({"id": mid, "credits": (meta or {}).get("credits"),
+                             "availability": observed})
+        else:
+            data.append({**model_entry(mid, meta), "availability": observed})
+    return data, excluded
+
+
+def require_nonempty_chat(chat):
+    """An empty upstream reply is a failure, not a successful zero-token chat."""
+    for choice in chat.get("choices") or []:
+        message = choice.get("message") or {}
+        if any(message.get(key) for key in ("content", "reasoning_content", "tool_calls", "refusal")):
+            return chat
+    if ((chat.get("usage") or {}).get("completion_tokens") or 0) > 0:
+        return chat
+    raise RuntimeError(EMPTY_UPSTREAM_RESPONSE)
+
+
+def require_nonempty_stream(raw_iter):
+    """Validate SSE completion without buffering or replaying a request.
+
+    Role/finish/usage-only zero frames are not a generated answer. Text,
+    reasoning, named tool calls, refusals and positive output usage are valid.
+    """
+    generated = False
+    for line in raw_iter:
+        data = strip_data_prefix(line.decode("utf-8", "replace"))
+        try:
+            chunk = json.loads(data)
+        except (ValueError, TypeError):
+            chunk = None
+        if isinstance(chunk, dict):
+            if isinstance(chunk.get("error"), dict):
+                raise RuntimeError("upstream stream returned an error")
+            if ((chunk.get("usage") or {}).get("completion_tokens") or 0) > 0:
+                generated = True
+            for choice in chunk.get("choices") or []:
+                delta = choice.get("delta") or {}
+                if any(delta.get(key) for key in ("content", "reasoning_content", "refusal")):
+                    generated = True
+                if (delta.get("function_call") or {}).get("name"):
+                    generated = True
+                if any((call.get("function") or {}).get("name") for call in delta.get("tool_calls") or []):
+                    generated = True
+        # Validate before converters consume [DONE] and break their iterators.
+        if data == "[DONE]":
+            if not generated:
+                raise RuntimeError(EMPTY_UPSTREAM_RESPONSE)
+            yield line
+            return
+        yield line
+    if not generated:
+        raise RuntimeError(EMPTY_UPSTREAM_RESPONSE)
+
+
 def model_entry(mid, meta):
     """Build a rich /v1/models entry from the desktop app catalog metadata.
     The OpenAI spec only names id/object/created/owned_by, so capability data is
@@ -12652,6 +12852,7 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             # model and the request, and the callers record it on the usage row.
             return resp, account, upstream_effort_of(upstream_body, model)
         except urllib.error.HTTPError as exc:
+            exc.account_uid = account.uid
             if exc.code == 429:
                 try:
                     detail = exc.read(600).decode("utf-8", "replace")
@@ -12957,7 +13158,7 @@ def estimate_tokens(text):
 
 def aggregate_stream(raw_iter, model, resp_id):
     """Fold an SSE stream into one non-streaming chat.completion object."""
-    content, reasoning, finish = [], [], "stop"
+    content, reasoning, refusal, finish = [], [], [], "stop"
     tool_calls_map = {}
     usage = None
     started = time.time()
@@ -12973,6 +13174,8 @@ def aggregate_stream(raw_iter, model, resp_id):
             chunk = json.loads(data)
         except Exception:
             continue
+        if isinstance(chunk, dict) and isinstance(chunk.get("error"), dict):
+            raise RuntimeError("upstream stream returned an error")
         if first_chunk_at is None:
             first_chunk_at = time.time()
         if chunk.get("id"):
@@ -12989,6 +13192,8 @@ def aggregate_stream(raw_iter, model, resp_id):
                 content.append(delta["content"])
             if delta.get("reasoning_content"):
                 reasoning.append(delta["reasoning_content"])
+            if delta.get("refusal"):
+                refusal.append(delta["refusal"])
             for tc in delta.get("tool_calls") or []:
                 idx = tc.get("index")
                 if idx is None:
@@ -13042,6 +13247,8 @@ def aggregate_stream(raw_iter, model, resp_id):
     message = {"role": "assistant", "content": "".join(content)}
     if reasoning:
         message["reasoning_content"] = "".join(reasoning)
+    if refusal:
+        message["refusal"] = "".join(refusal)
     # A call the model printed instead of emitting arrives as `content`. The
     # Responses path has parsed that shape for a while; this one did not, so the
     # client saw prose, found no call, and ended the turn with nothing to run.
@@ -14745,6 +14952,7 @@ def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, name
 def stream_responses_events(upstream, model, holder):
     """Yield Responses-API SSE frames translated from chat-completions chunks."""
     resp_id, msg_id, rs_id = _new_id("resp_"), _new_id("msg_"), _new_id("rs_")
+    holder["response_id"] = resp_id
     created = int(time.time())
     seq = 0
     text_parts, reason_parts = [], []
@@ -15991,9 +16199,13 @@ class Handler(BaseHTTPRequestHandler):
             wb_modelsdev.refresh_async(ACCOUNTS_DIR, log=log)
         except Exception:
             pass
-        data = [model_entry(mid, meta) for mid, meta in entries]
+        data, excluded = model_listing(req_realm, entries)
         return self._json(200, {"object": "list", "data": data, "realm": req_realm or CURRENT_REALM,
-                                "catalog": catalog_status(req_realm)})
+            "excluded": excluded, "catalog": {**catalog_status(req_realm),
+                "upstreamCount": len(entries), "count": len(data), "excludedCount": len(excluded),
+                "verifiedCount": sum(m["availability"].get("status") == "available" for m in data),
+                "availability": "observed_requests", "successValiditySeconds": 86400,
+                "failureRecovery": "successful_request_required"}})
 
     def _get_v1_usage(self, query):
         if not self._authorized():
@@ -17801,15 +18013,12 @@ class Handler(BaseHTTPRequestHandler):
         }
         forwarded = build_upstream_body(test_body)
         body = json.dumps(forwarded, ensure_ascii=False).encode("utf-8")
-        headers, request_proxy = account.request_snapshot()
-        req = urllib.request.Request(
-            chat_url, data=body, method="POST",
-            headers=headers
-        )
         t0 = time.time()
         try:
+            headers, request_proxy = account.request_snapshot()
+            req = urllib.request.Request(chat_url, data=body, method="POST", headers=headers)
             with wb_accounts.urlopen(req, timeout=30, proxy=request_proxy) as resp:
-                chat_obj = aggregate_stream(resp, test_model, None)
+                chat_obj = require_nonempty_chat(aggregate_stream(resp, test_model, None))
                 wall_ms = int((time.time() - t0) * 1000)
                 choices = chat_obj.get("choices") or []
                 msg = (choices[0].get("message") or {}) if choices else {}
@@ -17824,6 +18033,9 @@ class Handler(BaseHTTPRequestHandler):
                 # models keep theirs, and a 402 balance park keeps its own lift
                 # path (revive_balance_cooldown on a credits refresh).
                 account.note_success(model=test_model)
+                remember_model_observation({"at": time.time(), "model": test_model,
+                    "realm": account.realm, "account": account.uid,
+                    "outcome": "completed", "response_validated": True})
                 log(f"account test: uid={account.uid[:8]} model={test_model} wall={wall_ms}ms ok=True", tag="accounts")
                 return self._json(200, {
                     "ok": True,
@@ -17835,9 +18047,15 @@ class Handler(BaseHTTPRequestHandler):
         except urllib.error.HTTPError as exc:
             wall_ms = int((time.time() - t0) * 1000)
             detail = exc.read(400).decode("utf-8", "replace")
+            remember_model_observation({"at": time.time(), "model": test_model,
+                "realm": account.realm, "account": account.uid,
+                "status": exc.code, "message": detail, "outcome": "failed"})
             # The label keeps its 80-char cut; `detail` rides along untouched so the
             # panel can show the whole upstream body on hover.
-            account.note_error(f"HTTP {exc.code}: {detail[:80]}", cooldown=60, detail=detail)
+            observed = model_observation({"at": time.time(), "model": test_model,
+                "status": exc.code, "message": detail})
+            if not observed:
+                account.note_error(f"HTTP {exc.code}: {detail[:80]}", cooldown=60, detail=detail)
             log(f"account test: uid={account.uid[:8]} model={test_model} wall={wall_ms}ms error={exc.code}", level="WARN", tag="accounts")
             return self._json(200, {
                 "ok": False,
@@ -17848,7 +18066,14 @@ class Handler(BaseHTTPRequestHandler):
             })
         except Exception as exc:
             wall_ms = int((time.time() - t0) * 1000)
-            account.note_error(str(exc)[:80], cooldown=60)
+            remember_model_observation({"at": time.time(), "model": test_model,
+                "realm": account.realm, "account": account.uid,
+                "message": str(exc), "outcome": "failed"})
+            if (EMPTY_UPSTREAM_RESPONSE not in str(exc)
+                    and not (wb_resin.enabled(account)
+                             and (isinstance(exc, wb_resin.RouteUnavailable)
+                                  or wb_resin.guard_rejected(exc) or wb_resin.transport_failure(exc)))):
+                account.note_error(str(exc)[:80], cooldown=60)
             log(f"account test: uid={account.uid[:8]} model={test_model} wall={wall_ms}ms exc={exc}", level="WARN", tag="accounts")
             return self._json(200, {
                 "ok": False,
@@ -18090,7 +18315,7 @@ class Handler(BaseHTTPRequestHandler):
                 holder.pop("internal_calls", None)
                 holder.pop("suppress_completion", None)
                 holder["suppress_lifecycle"] = rounds > 0
-                for frame in stream_responses_events(upstream, model, holder):
+                for frame in stream_responses_events(require_nonempty_stream(upstream), model, holder):
                     if first_ms is None:
                         first_ms = int((time.time() - t_start) * 1000)
                     self.wfile.write(clean_responses_frame(frame))
@@ -18128,6 +18353,11 @@ class Handler(BaseHTTPRequestHandler):
                          gen_ms=(wall - first_ms) if first_ms is not None else None,
                          fp=fp, outcome="upstream_aborted", key=self._key_id())
             try:
+                failure = {"type": "response.failed", "response": {
+                    "id": holder.get("response_id") or _new_id("resp_"), "object": "response",
+                    "status": "failed", "model": model,
+                    "error": {"code": "upstream_error", "message": str(exc)}}}
+                self.wfile.write(("event: response.failed\ndata: " + json.dumps(failure) + "\n\n").encode("utf-8"))
                 self.wfile.write(b"data: [DONE]" + bytes([10, 10]))
                 self.wfile.flush()
             except Exception:
@@ -18144,7 +18374,8 @@ class Handler(BaseHTTPRequestHandler):
         record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
                      ttft_ms=first_ms,
                      gen_ms=(wall - first_ms) if first_ms is not None else None,
-                     fp=fp, account=account.uid, key=self._key_id(), effort=effort)
+                     fp=fp, account=account.uid, key=self._key_id(), effort=effort,
+                     response_validated=True)
         return
 
     def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None):
@@ -18158,7 +18389,7 @@ class Handler(BaseHTTPRequestHandler):
         web_tools = web_tools_active(base_body)
         while True:
             try:
-                chat_obj = aggregate_stream(upstream, model, None)
+                chat_obj = require_nonempty_chat(aggregate_stream(upstream, model, None))
             except Exception as exc:
                 record_error(model, 502, str(exc),
                              elapsed_ms=int((time.time() - t_start) * 1000),
@@ -18189,7 +18420,7 @@ class Handler(BaseHTTPRequestHandler):
         result = chat_to_response(chat_obj, model, custom_names, request_meta, namespace_map,
                                   sources=sources)
         record_usage(model, chat_obj.get("usage"), stream=False, elapsed_ms=wall, fp=fp,
-                     account=account.uid, key=self._key_id(), effort=effort)
+                     account=account.uid, key=self._key_id(), effort=effort, response_validated=True)
         return self._json(200, result)
 
     def _handle_messages_count_tokens(self, payload):
@@ -18288,11 +18519,11 @@ class Handler(BaseHTTPRequestHandler):
                                      base_body=None, session_key=None, realm=None,
                                      effort=None):
         try:
-            chat_obj = aggregate_stream(upstream, model, None)
+            chat_obj = require_nonempty_chat(aggregate_stream(upstream, model, None))
             result = chat_to_messages(chat_obj)
             wall = int((time.time() - t_start) * 1000)
             record_usage(model, chat_obj.get("usage"), stream=False, elapsed_ms=wall,
-                         fp=fp, account=account.uid, key=self._key_id(), effort=effort)
+                         fp=fp, account=account.uid, key=self._key_id(), effort=effort, response_validated=True)
             return self._json(200, result)
         except Exception as exc:
             wall = int((time.time() - t_start) * 1000)
@@ -18318,7 +18549,7 @@ class Handler(BaseHTTPRequestHandler):
         holder = {"usage": None}
         first_ms = None
         try:
-            for frame in stream_messages_events(upstream, model, holder):
+            for frame in stream_messages_events(require_nonempty_stream(upstream), model, holder):
                 if first_ms is None:
                     first_ms = int((time.time() - t_start) * 1000)
                 self.wfile.write(frame)
@@ -18354,7 +18585,8 @@ class Handler(BaseHTTPRequestHandler):
         record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
                      ttft_ms=first_ms,
                      gen_ms=(wall - first_ms) if first_ms is not None else None,
-                     fp=fp, account=account.uid, key=self._key_id(), effort=effort)
+                     fp=fp, account=account.uid, key=self._key_id(), effort=effort,
+                     response_validated=True)
         return
 
     def do_POST(self):
@@ -18594,7 +18826,7 @@ class Handler(BaseHTTPRequestHandler):
                             write_chunk(payload)
 
             try:
-                for line in upstream:
+                for line in require_nonempty_stream(upstream):
                     data = strip_data_prefix(line.decode("utf-8", "replace"))
                     if not data or data == "[DONE]" or data.startswith(":"):
                         continue
@@ -18657,6 +18889,8 @@ class Handler(BaseHTTPRequestHandler):
                             gen_ms=(wall - first_ms) if first_ms is not None else None,
                              fp=fp, outcome="upstream_aborted", key=self._key_id())
                 try:
+                    err = json.dumps({"error": {"message": str(exc), "type": "server_error"}})
+                    self.wfile.write(f"data: {err}\n\n".encode("utf-8"))
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
                 except Exception:
@@ -18683,12 +18917,13 @@ class Handler(BaseHTTPRequestHandler):
             record_usage(model, last_usage, stream=True,
                          elapsed_ms=wall, ttft_ms=first_ms,
                          gen_ms=(wall - first_ms) if first_ms is not None else None,
-                         fp=fp, account=account.uid, key=self._key_id(), effort=effort)
+                         fp=fp, account=account.uid, key=self._key_id(), effort=effort,
+                         response_validated=True)
             return
 
     def _chat_nonstream_response(self, upstream, model, fp, account, t_start, effort=None):
         try:
-            result = aggregate_stream(upstream, model, None)
+            result = require_nonempty_chat(aggregate_stream(upstream, model, None))
         except Exception as exc:
             record_error(model, 502, str(exc), elapsed_ms=int((time.time() - t_start) * 1000),
                          account=account.uid, key=self._key_id())
@@ -18700,7 +18935,8 @@ class Handler(BaseHTTPRequestHandler):
         record_usage(model, result.get("usage"), stream=False,
                      elapsed_ms=wall, ttft_ms=first_ms,
                      gen_ms=(wall - first_ms) if first_ms is not None else None,
-                     fp=fp, account=account.uid, key=self._key_id(), effort=effort)
+                     fp=fp, account=account.uid, key=self._key_id(), effort=effort,
+                     response_validated=True)
         return self._json(200, result)
 
 def running_version():
