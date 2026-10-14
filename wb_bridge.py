@@ -113,7 +113,7 @@ class Bridge:
         return dict(row)
 
     def persist(self, row):
-        if row["state"] in {"ready", "failed", "expired"}:
+        if row["state"] in {"ready", "failed", "expired", "cancelled"}:
             payload = json.loads(row["payload"])
             for key in ("candidate", "oauthState", "authUrl"):
                 payload.pop(key, None)
@@ -187,29 +187,45 @@ class Bridge:
                 "X-Requested-With": "XMLHttpRequest", "User-Agent": cfg["billing_ua"],
                 "Origin": cfg["origin"], "Referer": cfg["origin"] + "/"}
 
+    def reconcile_committed(self, row):
+        # Account-file commit is authoritative even if its SQLite receipt was
+        # interrupted. Cancellation must not discard an already delivered token.
+        for account in self.pool.accounts:
+            if account.bridge_task != row["id"] or not account.path:
+                continue
+            try:
+                saved = json.loads(Path(account.path).read_text())
+            except (OSError, ValueError):
+                continue
+            if (saved.get("bridgeTask") == row["id"] and saved.get("bridgeRef") == row["account_ref"]
+                    and saved.get("uid") == account.uid):
+                row.update(state="ready", result=json.dumps(public_account(account)))
+                self.persist(row)
+                return self.view(row)
+        return None
+
+    def cancel(self, task_id):
+        with self.lock:
+            row = self.stored(task_id)
+            if row["state"] in {"ready", "failed", "expired", "cancelled"}:
+                return self.view(row)
+            delivered = self.reconcile_committed(row)
+            if delivered:
+                return delivered
+            row["state"] = "cancelled"
+            self.persist(row)
+            return self.view(row)
+
     def poll(self, task_id):
         import wb_accounts as accounts
         with self.lock:
             row = self.stored(task_id)
-            if row["state"] in {"ready", "failed", "expired"}:
+            if row["state"] in {"ready", "failed", "expired", "cancelled"}:
                 return self.view(row)
             # Recover the account-file commit if its SQLite acknowledgement was lost.
-            committed = None
-            for account in self.pool.accounts:
-                if account.bridge_task != task_id or not account.path:
-                    continue
-                try:
-                    saved = json.loads(Path(account.path).read_text())
-                except (OSError, ValueError):
-                    continue
-                if (saved.get("bridgeTask") == task_id and saved.get("bridgeRef") == row["account_ref"]
-                        and saved.get("uid") == account.uid):
-                    committed = account
-                    break
+            committed = self.reconcile_committed(row)
             if committed:
-                row.update(state="ready", result=json.dumps(public_account(committed)))
-                self.persist(row)
-                return self.view(row)
+                return committed
             if row["created"] + 600 < time.time():
                 row["state"] = "expired"
                 self.persist(row)
@@ -309,7 +325,8 @@ def health(proxy):
     busy += int(bool(proxy.SCHEDULER and proxy.SCHEDULER._run_lock.locked()))
     busy += _bridge.active if _bridge else 0
     return {"ok": True, "service": "workbuddy-hub", "protocol": "workbuddy-hub/v1",
-            "commit": commit, "activeJobs": busy, "internationalDailyChat": daily_enabled()}
+            "commit": commit, "activeJobs": busy, "internationalDailyChat": daily_enabled(),
+            "capabilities": {"loginCancel": True}}
 
 
 def dispatch(handler, proxy):
@@ -348,7 +365,7 @@ def dispatch(handler, proxy):
                                         for a in proxy.POOL.accounts if a.bridge_ref]})
         return True
     if handler.command != "POST" or path not in {"/bridge/v1/login/start", "/bridge/v1/login/poll",
-                                                "/bridge/v1/routes/reconcile"}:
+                                                "/bridge/v1/login/cancel", "/bridge/v1/routes/reconcile"}:
         handler._json(404, {"error": "bridge operation not found"})
         return True
     try:
@@ -356,7 +373,7 @@ def dispatch(handler, proxy):
         if not 0 < size <= 32768:
             raise ValueError("invalid body length")
         payload = json.loads(handler.rfile.read(size))
-        if not isinstance(payload, dict) or draining():
+        if not isinstance(payload, dict) or (draining() and not path.endswith("/cancel")):
             raise ValueError("bridge is unavailable")
         service.active += 1
         try:
@@ -377,8 +394,12 @@ def dispatch(handler, proxy):
                         results.append({"uid": account.uid, "ok": False, "errorKind": type(error).__name__,
                                         "egress": wb_resin.public_route(account)})
                 result = {"accounts": results}
+            elif path.endswith("/start"):
+                result = service.start(payload)
+            elif path.endswith("/cancel"):
+                result = service.cancel(str(payload.get("id", "")))
             else:
-                result = service.start(payload) if path.endswith("/start") else service.poll(str(payload.get("id", "")))
+                result = service.poll(str(payload.get("id", "")))
         finally:
             service.active -= 1
         handler._json(200, result)

@@ -108,6 +108,43 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(self.bridge.stored(pending["id"])["state"], "candidate")
         self.assertEqual(self.pool.accounts, [])
 
+    def test_cancel_revokes_pending_authorization_and_releases_identity_lock(self):
+        pending = self.pending("official-uid")
+        result = self.bridge.cancel(pending["id"])
+        self.assertEqual(result["status"], "cancelled")
+        self.assertNotIn("authUrl", result)
+        self.assertEqual(self.bridge.cancel(pending["id"]), result)
+        with patch.object(accounts, "http_json") as network:
+            self.assertEqual(self.bridge.poll(pending["id"])["status"], "cancelled")
+            network.assert_not_called()
+        saved = json.loads(self.bridge.stored(pending["id"])["payload"])
+        for field in ("candidate", "oauthState", "authUrl"):
+            self.assertNotIn(field, saved)
+        with patch.object(accounts, "http_json", return_value={"data": {"state": "next-state", "authUrl": "https://www.workbuddy.ai/login?state=next-state"}}):
+            next_task = self.bridge.start({"accountRef": "account-hub:instance:9", "idempotencyKey": "synthetic-login-002",
+                "githubLogin": "WesPerez", "route": route(), "expectedUid": "official-uid"})
+        self.assertNotEqual(next_task["id"], pending["id"])
+        self.assertEqual(next_task["status"], "pending")
+
+    def test_cancel_reconciles_a_completed_account_file_before_reporting_cancelled(self):
+        pending = self.pending("official-uid")
+        response = {"code": 0, "data": {"accessToken": token(), "refreshToken": "synthetic-refresh"}}
+        persist = self.bridge.persist
+        def interrupt(row):
+            if row["state"] == "ready":
+                raise OSError("simulated receipt interruption")
+            return persist(row)
+        with patch.object(accounts, "http_json", return_value=response), patch.object(accounts, "fetch_account_profile", return_value=("official-uid", "Name")), patch.object(self.bridge, "persist", side_effect=interrupt):
+            with self.assertRaises(OSError):
+                self.bridge.poll(pending["id"])
+        with patch.object(accounts, "http_json") as network:
+            result = self.bridge.cancel(pending["id"])
+            network.assert_not_called()
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(len(self.pool.accounts), 1)
+        self.assertNotIn("synthetic-refresh", json.dumps(result))
+        self.assertEqual(self.bridge.cancel(pending["id"]), result)
+
     def test_international_automated_chat_is_disabled_by_default(self):
         with patch.dict(os.environ, {"WB_INTERNATIONAL_DAILY_CHAT": "0"}):
             acc = accounts.Account({"uid": "u", "realm": "intl", "accessToken": token()})
