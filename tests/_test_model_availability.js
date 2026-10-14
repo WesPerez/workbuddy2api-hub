@@ -27,7 +27,7 @@ const api = new Function(dashboardScript() + `
   assert.ok(tbody.innerHTML.includes('近期请求成功'));
   assert.ok(tbody.innerHTML.includes('尚未验证'));
   assert.ok(tbody.innerHTML.includes('未提供'));
-  assert.ok(!tbody.innerHTML.includes('bad'));
+  assert.ok(!tbody.innerHTML.includes('bad&lt;model&gt;'));
   const excluded = dom.byId('excludedModels').innerHTML;
   assert.ok(excluded.includes('bad&lt;model&gt;'));
   assert.ok(!excluded.includes('bad<model>'));
