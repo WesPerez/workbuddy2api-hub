@@ -26,7 +26,7 @@ class RouteUnavailable(RuntimeError):
 
 class ManagedProxy(str):
     def __new__(cls, route, uid):
-        value = super().__new__(cls, wb_bridge.guarded_proxy(route))
+        value = super().__new__(cls, wb_bridge.guarded_proxy(route, allow_ipv6=True))
         value.route = copy.deepcopy(route)
         value.uid = uid
         return value
@@ -154,7 +154,7 @@ def _binding(route, result):
         "leaseGuardVersion": lease.get("lease_guard_version"), "expiry": lease.get("expiry")}
     candidate = {**route, "binding": binding}
     try:
-        wb_bridge.validate_route(candidate)
+        wb_bridge.validate_route(candidate, allow_ipv6=True)
         if not isinstance(binding["leaseCreatedAt"], str):
             raise ValueError("lease generation must be a string")
     except (ValueError, TypeError):

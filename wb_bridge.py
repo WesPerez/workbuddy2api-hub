@@ -42,7 +42,7 @@ def strict_proxy(proxy):
         return False
 
 
-def validate_route(route):
+def validate_route(route, allow_ipv6=False):
     if not isinstance(route, dict):
         raise ValueError("managed route is required")
     proxy, binding = route.get("proxy", {}), route.get("binding", {})
@@ -58,13 +58,18 @@ def validate_route(route):
             or not re.fullmatch(r"[a-f0-9]{32}", binding.get("nodeHash", ""))
             or not re.fullmatch(r"[1-9][0-9]{0,18}", str(binding.get("leaseCreatedAt", "")))):
         raise ValueError("managed route guard is incomplete")
-    if ipaddress.ip_address(binding.get("ip", "")).version != 4:
+    address = ipaddress.ip_address(binding.get("ip", ""))
+    if address.version != 4 and not allow_ipv6:
         raise ValueError("managed route requires verified IPv4")
+    if address.version == 6 and (getattr(address, "scope_id", None)
+            or address.is_multicast or address.is_unspecified
+            or address.is_loopback or address.is_link_local):
+        raise ValueError("managed route requires an unscoped unicast IP")
     return route
 
 
-def guarded_proxy(route):
-    validate_route(route)
+def guarded_proxy(route, allow_ipv6=False):
+    validate_route(route, allow_ipv6=allow_ipv6)
     proxy, binding = route["proxy"], route["binding"]
     # New CONNECTs are fenced by the original node, IP and lease generation.
     # A minute bucket preserves bounded connection reuse within the lease.

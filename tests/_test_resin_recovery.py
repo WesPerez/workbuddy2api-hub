@@ -1,5 +1,6 @@
 """Gateway leases: exact identity, guarded recovery, bounded failure and no replay."""
 import copy
+import base64
 import io
 import json
 import os
@@ -19,6 +20,7 @@ _TMP = isolated_data_dirs("wb-resin-")
 os.environ["WB_DATA_DIR"] = _TMP.name
 import wb_accounts as A
 import wb_resin as R
+import wb_bridge as B
 
 
 def account(uid="u", ref="account-hub:1"):
@@ -79,6 +81,22 @@ class ResinTests(unittest.TestCase):
             save.assert_not_called()
         self.assertEqual(len(values), 8)
         self.assertEqual(len(self.calls), 1)
+
+    def test_ipv6_api_lease_keeps_exact_guard_without_relaxing_browser_login(self):
+        route = R.source_route(self.acc)
+        with patch.object(R, "_control", return_value=result(route, ip="2001:db8::7")):
+            proxy = self.acc.proxy
+        username = urllib.parse.unquote(urllib.parse.urlsplit(proxy).username)
+        encoded_ip = username.rsplit("~", 1)[1]
+        self.assertEqual(base64.urlsafe_b64decode(encoded_ip + "=" * (-len(encoded_ip) % 4)).decode(),
+                         "2001:db8::7")
+        self.assertEqual(self.acc.public()["egress"]["ip"], "2001:db8::7")
+        with self.assertRaises(ValueError):
+            B.guarded_proxy(proxy.route)
+        for ip in ("fe80::1%eth0", "::", "::1", "ff02::1", "not-an-ip"):
+            R._states.clear()
+            with patch.object(R, "_control", return_value=result(route, ip=ip)), self.assertRaises(R.RouteUnavailable):
+                self.acc.proxy
 
     def test_connect_409_reacquires_once_and_uses_new_generation(self):
         proxy = self.acc.proxy
