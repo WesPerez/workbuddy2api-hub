@@ -9978,6 +9978,7 @@ CN_UI_ORDER = [
     "deepseek-v4-pro",
 ]
 INTL_UI_ORDER = [
+    "hy4-preview",
     "hy3",
     "step-5-preview",
     "deepseek-v4.1-flash",

@@ -58,10 +58,9 @@ OR = {
     "moonshotai/kimi-k2.6": rate(0.00000043415, 0.000001828, 0.00000007312),
 }
 
-# The five virtual alias names in the bundled catalogue: not models, never
+# The four virtual alias names in the current bundled catalogue: not models, never
 # priced, never counted as a coverage gap.
-ALIASES = ("default-model", "fast-model", "balanced-model", "primary-model",
-           "deep-model")
+ALIASES = ("default-model", "fast-model", "balanced-model", "primary-model")
 
 
 class PricingTestCase(unittest.TestCase):
@@ -142,13 +141,12 @@ class UnionInputTests(PricingTestCase):
         self.assertEqual(sorted(unpriced2), sorted(unpriced))
 
     def test_run_once_prices_a_live_only_model(self):
-        original = P.read_cached_remote_catalog
-        P.read_cached_remote_catalog = lambda realm: (["glm-5.3-flashx"], {})
-        try:
+        # Exercise pricing's live input independently of persisted catalogue
+        # fallback from other tests or the machine's desktop cache.
+        with unittest.mock.patch.object(P, "curated_live_sources",
+                return_value=([("glm-5.3-flashx", {})], True)):
             refresher = self._refresher()
             ok, message = refresher.run_once()
-        finally:
-            P.read_cached_remote_catalog = original
         self.assertTrue(ok, message)
         self.assertEqual(refresher.last_extra, 1)
         _at, assignment = wb_pricing.current_assignment()
@@ -297,7 +295,7 @@ class SingleGatewayInstanceTests(PricingTestCase):
 
             def curated_live_sources(self, realm):
                 self.realms.append(realm)
-                return ([("gpt-6-sol", {})], True)
+                return ([("fixture-live-model", {})], True)
 
             def add_log_entry(self, message, tag=None):
                 self.lines.append((message, tag))
@@ -312,7 +310,7 @@ class SingleGatewayInstanceTests(PricingTestCase):
         self.assertEqual(fake.realms, ["intl", "cn"])
         # ...and the name the bundled catalogue has never seen is the one
         # that enters the price input.
-        self.assertEqual(ids, ["gpt-6-sol"])
+        self.assertEqual(ids, ["fixture-live-model"])
 
     def test_the_pricing_lines_reach_the_running_gateway(self):
         fake = self._fake_gateway()
