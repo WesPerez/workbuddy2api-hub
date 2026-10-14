@@ -359,6 +359,10 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
+- 设置页可按国际版、国内版分别配置余额与账单、模型目录和模型请求通道。每项使用独立服务地址、鉴权方式、凭据文件和超时；默认继续使用原接口。配置位于 `upstream.capabilities.{billing,models,chat}.{intl,cn}`，启用项使用 `enabled/base_url/auth/header_name/key_file/timeout_seconds`。服务地址保留路径前缀，并拼接既有 WorkBuddy 协议路径；模型目录使用 `/v3/config` 和既有模型发现路径，账单服务需兼容原有的套餐、余额及签到响应。
+- 独立来源仅使用自己的凭据文件；`auth` 支持 `none/bearer/header/account`，其中账号身份只可发送到该能力原有的官方域名。配置接口不会变更 OAuth、刷新令牌、网页活动协议或模型元数据公共参考源。模型目录和账单的配置不影响模型请求通道。
+- 独立接口不跟随重定向，写请求失败后不自动重放；继续使用账号已有的受管代理，出口失效时停止。每次请求将地址、凭据与出口一起取快照。超时是现有请求预算之内的上限；保存配置不发起签到、推理或账单写入。
+
 - **修复：命名空间内的自由格式（`type: "custom"`）工具回程被判成 `function_call`，调用发出去却没有返回**（#308 跟进）：`custom_tool_names()` 此前只扫工具清单顶层，于是嵌在 `type: "namespace"` 里的 `exec`（Codex Desktop 的 `functions` 命名空间里它就是 `custom`）从未进入 `custom_names`；`chat_to_response()` 与流式分支用该集合决定回程条目类型，判错后发成 `function_call`，而客户端按 `(name, namespace, kind)` 三元组匹配执行器——类型对不上就找不到执行器，调用既不执行也不返回，模型只能无限重试（现场实测同类会话堆积 42 次调用、0 条结果，agent 反复报「工具被中断」）。现在 `custom_tool_names()` 递归进 namespace 的 `tools` / `children` / `functions` 栏位（深度上限沿用 `NAMESPACE_MAX_DEPTH`）。
 - **修复：工具整份下发在 `input` 的 `additional_tools` 条目里时，回程侧看到的工具清单是空的**（#308 跟进）：出站已合并该条目（v1.7.2 / #308），但 `_handle_responses()` 里 `custom_tool_names()` 与回显的 `request_meta["tools"]` 仍只读顶层 `tools` 字段——新版 Codex Desktop 顶层是空的，于是出站与回程看到两份不同的工具清单。现在两处都走新提取的公共函数 `additional_tools_from_input()`，与 `responses_to_chat()` 用同一份合并清单；请求日志相应扩成 `tools=上游数/合并后数`，便于一眼看出两边是否对齐。`local_web_tools_enabled()` 开启时的 `client_wants_web()` 也改用合并后的清单（该开关默认关，老安装行为不变）。
 - 回归测试：`tests/_test_custom_tools.py` 新增 `[13]`/`[14]`/`[15]` 三节（15 项，套件总数不变）：钉住嵌套 custom 的收集（含 `children` / `functions` 栏位）、嵌套 custom 往返成 `custom_tool_call` 且 `namespace` 正确、同命名空间内的普通 function 仍走 `function_call` 作反面对照，以及工具整份来自 `additional_tools` 时出站合并与回程取值一致。

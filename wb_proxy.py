@@ -67,6 +67,7 @@ import wb_resin
 import wb_ipintel
 import wb_pricing
 import wb_settings
+import wb_sources
 import wb_upstream_pool
 import wb_webtools
 import wb_identity
@@ -10689,7 +10690,6 @@ def fetch_remote_product_config(realm):
         log("remote catalog: no usable %s account, skipping" % realm)
         return None
     cfg = wb_accounts.get_realm_config(realm)
-    url = cfg["chat_upstream"] + REMOTE_CONFIG_PATH
     # The chat UA is the desktop identity the rest of the gateway uses; the
     # plain app UA is the second try, for a build that answers only to it.
     uas = [cfg["chat_ua"]]
@@ -10705,8 +10705,9 @@ def fetch_remote_product_config(realm):
             if remaining <= 0:
                 break
             try:
-                headers, request_proxy = account.request_snapshot(header_factory=lambda: remote_config_headers(account, realm, ua))
-                req = urllib.request.Request(url, headers=headers, method="GET")
+                url, headers, request_proxy = account.capability_snapshot(
+                    "models", REMOTE_CONFIG_PATH, header_factory=lambda: remote_config_headers(account, realm, ua))
+                req = wb_sources.request(url, headers=headers, method="GET")
                 with wb_accounts.urlopen(req, timeout=min(6, remaining), proxy=request_proxy) as resp:
                     payload = json.loads(resp.read().decode("utf-8", "replace"))
             except Exception as exc:
@@ -10820,9 +10821,10 @@ def fetch_endpoint_models():
         log("model discovery skipped: no usable account")
         cached = _models_cache.get("intl", {}).get("data")
         return [m for m, _ in (cached or [])]
-    headers, request_proxy = account.request_snapshot()
-    req = urllib.request.Request(UPSTREAM + MODELS_PATH, method="GET", headers=headers)
     try:
+        url, headers, request_proxy = account.capability_snapshot(
+            "models", MODELS_PATH, native_base=UPSTREAM, header_factory=lambda: account.headers("chat"))
+        req = wb_sources.request(url, method="GET", headers=headers)
         with wb_accounts.urlopen(req, timeout=30, proxy=request_proxy) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except Exception as exc:
@@ -12824,7 +12826,7 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         tried.add(account.uid)
         last_uid = account.uid
         cfg = wb_accounts.get_realm_config(account.realm)
-        chat_url = account.chat_base_url() + CHAT_PATH
+        chat_url = ""
         # The cache key is account scoped, so it is rebuilt per candidate rather
         # than once up front. Opt-in only: measurement showed the upstream
         # caches prefixes without it (see prompt_cache_key_enabled).
@@ -12834,9 +12836,10 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             attempt_body = upstream_body
         attempt_data = json.dumps(attempt_body, ensure_ascii=False).encode("utf-8")
         request_proxy = None
+        req = None
         try:
-            headers, request_proxy = account.request_snapshot()
-            req = urllib.request.Request(chat_url, data=attempt_data, method="POST", headers=headers)
+            chat_url, headers, request_proxy = account.capability_snapshot("chat", CHAT_PATH)
+            req = wb_sources.request(chat_url, data=attempt_data, method="POST", headers=headers)
             resp = wb_accounts.urlopen(req, timeout=header_timeout,
                                        proxy=request_proxy)
             _apply_stream_idle_timeout(resp, idle_timeout)
@@ -12853,6 +12856,10 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             return resp, account, upstream_effort_of(upstream_body, model)
         except urllib.error.HTTPError as exc:
             exc.account_uid = account.uid
+            if getattr(req, 'capability_source', False):
+                # This is one independently authenticated service, not another
+                # account's credential. Do not replay or penalize the account.
+                raise
             if exc.code == 429:
                 try:
                     detail = exc.read(600).decode("utf-8", "replace")
@@ -13011,6 +13018,9 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                 continue
             raise
         except Exception as exc:
+            if isinstance(exc, wb_sources.SourceError) or getattr(req, 'capability_source', False):
+                last_error = exc
+                break
             if session_key and POOL:
                 POOL.affinity.demote(session_key, account.uid)
             if isinstance(exc, wb_resin.RouteUnavailable) or (
@@ -17083,9 +17093,9 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             try:
                 patch = wb_settings.validate_upstream_patch(raw)
+                wb_settings.set_upstream_config(ACCOUNTS_DIR, patch)
             except ValueError as exc:
                 return self._error(400, str(exc), "invalid_request_error")
-            wb_settings.set_upstream_config(ACCOUNTS_DIR, patch)
             reply["upstream"] = wb_settings.upstream_config(ACCOUNTS_DIR)
         if "prompt" in payload:
             raw = payload.get("prompt")
@@ -18005,7 +18015,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(404, "no such account")
         test_model = payload.get("model") or "deepseek-v4.1-flash"
         cfg = wb_accounts.get_realm_config(account.realm)
-        chat_url = account.chat_base_url() + CHAT_PATH
+        chat_url = ""
         test_body = {
             "model": test_model,
             "messages": [{"role": "user", "content": "hi"}],
@@ -18015,8 +18025,8 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(forwarded, ensure_ascii=False).encode("utf-8")
         t0 = time.time()
         try:
-            headers, request_proxy = account.request_snapshot()
-            req = urllib.request.Request(chat_url, data=body, method="POST", headers=headers)
+            chat_url, headers, request_proxy = account.capability_snapshot("chat", CHAT_PATH)
+            req = wb_sources.request(chat_url, data=body, method="POST", headers=headers)
             with wb_accounts.urlopen(req, timeout=30, proxy=request_proxy) as resp:
                 chat_obj = require_nonempty_chat(aggregate_stream(resp, test_model, None))
                 wall_ms = int((time.time() - t0) * 1000)

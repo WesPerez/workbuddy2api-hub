@@ -15,6 +15,7 @@ import wb_activity
 import wb_atrest
 import wb_identity
 import wb_settings
+import wb_sources
 import wb_upstream_pool
 import wb_webagent
 import wb_bridge
@@ -138,6 +139,9 @@ def urlopen(req, timeout=30, proxy=""):
     """
     if wb_bridge.draining():
         raise RuntimeError("gateway is draining")
+    independent = getattr(req, 'capability_source', False)
+    if independent:
+        timeout = min(timeout, req.capability_timeout)
     if wb_bridge.strict_proxy(proxy):
         try:
             try:
@@ -151,7 +155,7 @@ def urlopen(req, timeout=30, proxy=""):
                 else:
                     raise
             if isinstance(proxy, wb_resin.ManagedProxy):
-                return wb_resin.ManagedResponse(response, proxy, "/chat/completions" in req.full_url)
+                return wb_resin.ManagedResponse(response, proxy, getattr(req, 'capability_kind', '') == 'chat' or "/chat/completions" in req.full_url)
             return response
         except wb_upstream_pool.PoolBypass:
             raise RuntimeError("protected proxy cannot use a direct or redirect fallback") from None
@@ -162,7 +166,12 @@ def urlopen(req, timeout=30, proxy=""):
         try:
             return wb_upstream_pool.urlopen(req, timeout=timeout, proxy=proxy)
         except wb_upstream_pool.PoolBypass:
+            if independent:
+                raise wb_sources.SourceError('独立接口不允许重定向或传输回退') from None
             pass
+    if independent:
+        handler = urllib.request.ProxyHandler({'http': proxy, 'https': proxy} if proxy else {})
+        return urllib.request.build_opener(handler, wb_sources.NoRedirect()).open(req, timeout=timeout)
     opener = opener_for_proxy(proxy)
     if opener is None:
         return urllib.request.urlopen(req, timeout=timeout)
@@ -180,7 +189,7 @@ def http_json(url, data=None, method=None, headers=None, timeout=30,
     attempts = max(1, int(retries or 1))
     last = None
     for attempt in range(1, attempts + 1):
-        req = urllib.request.Request(
+        req = wb_sources.request(
             url,
             data=data,
             method=method or ("POST" if data is not None else "GET"),
@@ -191,6 +200,9 @@ def http_json(url, data=None, method=None, headers=None, timeout=30,
                 return json.loads(resp.read().decode("utf-8"))
         except Exception as exc:
             last = exc
+            if isinstance(headers, wb_sources.SourceHeaders) and data is not None:
+                # The source may already have accepted a write. Never replay it.
+                break
             if (isinstance(proxy, wb_resin.ManagedProxy) and data is not None
                     and wb_resin.transport_failure(exc) and not wb_resin.guard_rejected(exc)):
                 # In particular, a refresh-token POST may already have rotated
@@ -692,6 +704,20 @@ class Account(object):
         with self._refresh_lock:
             headers = header_factory() if header_factory else self.headers(purpose)
             return headers, self.proxy
+
+    def capability_snapshot(self, kind, path='', native_base=None, header_factory=None):
+        """Bind one capability URL, credential generation and managed route."""
+        with self._refresh_lock:
+            cfg = get_realm_config(self.realm)
+            default = (wb_identity.endpoint_for(self.realm, self.product)[0] if kind == 'chat'
+                       else cfg['billing_upstream'] if kind == 'billing' else cfg['chat_upstream'])
+            directory = getattr(self, 'accounts_dir', '')
+            raw = wb_settings.upstream_config(directory)['capabilities'] if directory else {}
+            source = wb_sources.config(raw, kind, self.realm)
+            factory = header_factory or (lambda: self.headers('chat' if kind == 'chat' else 'billing'))
+            allowed = (cfg['billing_upstream'], cfg['chat_upstream']) if kind == 'billing' else ()
+            base, headers = wb_sources.resolve(source, kind, native_base or default, factory, allowed)
+            return base + path, headers, self.proxy
 
     def to_dict(self):
         """Full view of the account, including live state.
@@ -1282,6 +1308,11 @@ class Account(object):
 
     def chat_base_url(self):
         """这个帐号目前身分该打的端点。"""
+        directory = getattr(self, 'accounts_dir', '')
+        if directory:
+            source = wb_sources.config(wb_settings.upstream_config(directory)['capabilities'], 'chat', self.realm)
+            if source['enabled']:
+                return source['base_url']
         return wb_identity.endpoint_for(self.realm, self.product)[0]
 
     def refresh(self):
@@ -1498,8 +1529,7 @@ class Account(object):
     def _daily_chat_upstream(self, web=None):
         """每日活跃对话的实际流程；返回形状见 daily_chat。"""
         import wb_proxy
-        url = self.chat_base_url() + wb_proxy.CHAT_PATH
-        headers, request_proxy = self.request_snapshot("chat")
+        url, headers, request_proxy = self.capability_snapshot("chat", wb_proxy.CHAT_PATH)
         body = {
             "model": DAILY_CHAT_MODEL,
             "messages": [{"role": "user", "content": "Hi"}],
@@ -1509,7 +1539,7 @@ class Account(object):
         }
         req_body = wb_proxy.build_upstream_body(body)
         data = json.dumps(req_body, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        req = wb_sources.request(url, data=data, headers=headers, method="POST")
         try:
             with urlopen(req, timeout=20, proxy=request_proxy) as resp:
                 _ = resp.read()
@@ -1567,8 +1597,7 @@ class Account(object):
     def _checkin_upstream(self):
         """签到的实际请求；返回形状见 checkin。"""
         cfg = get_realm_config("cn")
-        url = cfg["billing_upstream"] + CHECKIN_PATH
-        headers, request_proxy = self.request_snapshot(purpose="billing")
+        url, headers, request_proxy = self.capability_snapshot("billing", CHECKIN_PATH)
         try:
             payload = http_json(url, data=b"{}", method="POST", headers=headers, timeout=15,
                                 proxy=request_proxy)
@@ -1719,9 +1748,8 @@ class Account(object):
 
     def _fetch_credits_cn_detailed(self):
         cfg = get_realm_config(self.realm)
-        headers, request_proxy = self.request_snapshot(purpose="billing")
+        base_billing, headers, request_proxy = self.capability_snapshot("billing")
         headers["X-Client-Platform"] = "web"
-        base_billing = cfg["billing_upstream"]
 
         # 1. 套餐概览
         summary_url = base_billing + RESOURCE_SUMMARY_PATH
@@ -1760,9 +1788,11 @@ class Account(object):
         # 4. 每日签到状态
         checkin_info = None
         try:
-            checkin_url = cfg.get("chat_upstream", "https://copilot.tencent.com") + CHECKIN_STATUS_PATH
-            c_res = http_json(checkin_url, data=b"{}", method="POST", headers=headers,
-                              timeout=10, proxy=request_proxy)
+            checkin_url, checkin_headers, checkin_proxy = self.capability_snapshot(
+                "billing", CHECKIN_STATUS_PATH, native_base=cfg["chat_upstream"])
+            checkin_headers["X-Client-Platform"] = "web"
+            c_res = http_json(checkin_url, data=b"{}", method="POST", headers=checkin_headers,
+                              timeout=10, proxy=checkin_proxy)
             c_data = c_res.get("data") or {}
             if c_data:
                 checkin_info = {
@@ -1853,8 +1883,7 @@ class Account(object):
             "PackageEndTimeRangeBegin": now,
             "PackageEndTimeRangeEnd": "2036-01-01 00:00:00",
         }
-        url = cfg["billing_upstream"] + GET_RESOURCE_PATH
-        headers, request_proxy = self.request_snapshot(purpose="billing")
+        url, headers, request_proxy = self.capability_snapshot("billing", GET_RESOURCE_PATH)
         try:
             res = http_json(url, data=json.dumps(body).encode(), method="POST", headers=headers,
                             timeout=30, proxy=request_proxy)
@@ -1935,8 +1964,7 @@ class Account(object):
         所以合成一个包条目，让看板的明细弹窗与到期提示照常工作。
         """
         cfg = get_realm_config(self.realm)
-        url = cfg["billing_upstream"] + ENTERPRISE_USAGE_PATH
-        headers, request_proxy = self.request_snapshot(purpose="billing")
+        url, headers, request_proxy = self.capability_snapshot("billing", ENTERPRISE_USAGE_PATH)
         headers["X-Client-Platform"] = "web"
         try:
             res = http_json(url, data=b"{}", method="POST", headers=headers,

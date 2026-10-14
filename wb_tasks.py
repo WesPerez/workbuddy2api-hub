@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 
 import wb_accounts as _accounts
+import wb_sources
 
 CHAT_BASE = "https://copilot.tencent.com"
 BILL_BASE = "https://www.codebuddy.cn"
@@ -400,10 +401,13 @@ def report_events(account, events, base=None):
     """
     if base is None:
         base = CHAT_BASE
-    url = base + "/v2/report"
-    headers, request_proxy = account.request_snapshot("billing" if base == BILL_BASE else "chat")
+    if base == BILL_BASE:
+        url, headers, request_proxy = account.capability_snapshot("billing", "/v2/report", native_base=base)
+    else:
+        url = base + "/v2/report"
+        headers, request_proxy = account.request_snapshot("chat")
     body = json.dumps(events).encode("utf-8")
-    req = urllib.request.Request(url, data=body, method="POST", headers=headers)
+    req = wb_sources.request(url, data=body, method="POST", headers=headers)
     try:
         with _accounts.urlopen(req, timeout=15, proxy=request_proxy) as resp:
             d = json.loads(resp.read().decode("utf-8"))
@@ -811,11 +815,11 @@ def run_streak_bonus(account):
         _log(f"makeup yesterday failed: {exc}")
 
     # 1. 尝试领新手礼包与补偿 (每号一次，无则业务错误静默)
-    b_hdrs, billing_proxy = account.request_snapshot("billing")
+    billing_base, b_hdrs, billing_proxy = account.capability_snapshot("billing", native_base=BILL_BASE)
     for path, name in [("/billing/meter/claim-gift", "新手礼包"),
                        ("/billing/meter/claim-compensation", "活动补偿")]:
         try:
-            req_g = urllib.request.Request(BILL_BASE + path, data=b"{}", method="POST", headers=b_hdrs)
+            req_g = wb_sources.request(billing_base + path, data=b"{}", method="POST", headers=b_hdrs)
             with _accounts.urlopen(req_g, timeout=10, proxy=billing_proxy) as resp:
                 d = json.loads(resp.read().decode("utf-8"))
                 if d.get("code") == 0:

@@ -3588,6 +3588,13 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     </section>
 
     <section>
+      <h2>信息源与模型通道 <em id="setCapabilityState"></em></h2>
+      <p style="font-size:12px;color:var(--dim)">余额信息、模型目录和模型请求可分别连接不同服务，并为国际版、国内版单独设置。未启用的项目沿用当前官方接口。保存后用于下一次请求。</p>
+      <div id="setCapabilitySources"></div>
+      <button onclick="saveCapabilitySources(this)">保存接口配置</button>
+    </section>
+
+    <section>
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
         <div>
           <h2 style="margin:0">API Key <em id="setKeyState"></em></h2>
@@ -8647,9 +8654,67 @@ async function saveWinMaxHeight(btn){
 }
 // ==== 面板窗口限高结束 ====
 
+function renderCapabilitySources(upstream){
+  const root = document.getElementById('setCapabilitySources');
+  if(!root) return;
+  const capabilities = upstream?.capabilities || {};
+  const kinds = [['billing','余额与账单','用于余额、套餐、签到和账单福利接口。'],
+                 ['models','模型目录','用于读取模型列表和产品目录。'],
+                 ['chat','模型请求通道','用于发送模型请求；请填写兼容 WorkBuddy 协议的服务。']];
+  const realms = [['intl','国际版'],['cn','国内版']];
+  root.innerHTML = realms.map(([realm,label]) => `<details><summary>${label}</summary>${kinds.map(([kind,title,help]) => {
+    const value = capabilities[kind]?.[realm] || {}, id = 'cap-' + kind + '-' + realm;
+    const field = (name,label,type='text',fallback='') => `<label style="display:grid;gap:5px;font-size:12px">${label}<input data-source-option id="${id}-${name}" type="${type}" value="${esc(value[name] ?? fallback)}" autocomplete="off" ${name==='timeout_seconds'?'min="1" max="300"':''} style="min-width:0;width:100%;box-sizing:border-box;padding:8px"></label>`;
+    return `<details data-capability="${kind}" data-realm="${realm}" style="margin:10px 0;padding:10px;border:1px solid var(--line);border-radius:8px"><summary>${title} · ${value.enabled?'独立接口':'默认接口'}</summary>
+      <p style="font-size:12px;color:var(--dim)">${help}</p>
+      <label><input id="${id}-enabled" type="checkbox" ${value.enabled?'checked':''} onchange="toggleCapabilityFields('${id}')"> 启用独立接口</label>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:12px 0">
+      ${field('base_url','服务地址（可包含路径前缀）','url')}
+      <label style="display:grid;gap:5px;font-size:12px">鉴权方式<select data-source-option id="${id}-auth" onchange="toggleCapabilityFields('${id}')" style="padding:8px">${[['none','无需凭据'],['bearer','独立 Bearer 令牌'],['header','独立请求头凭据'],['account','当前账号身份（仅原有官方接口）']].map(([key,label])=>`<option value="${key}" ${(value.auth||'none')===key?'selected':''}>${label}</option>`).join('')}</select></label>
+      ${field('key_file','凭据文件（服务器绝对路径）')}
+      ${field('header_name','鉴权请求头名称','text','X-API-Key')}
+      ${field('timeout_seconds','单次请求最大等待（秒）','number',120)}
+      </div>
+      <p style="font-size:12px;color:var(--dim)">独立凭据文件仅允许所有者读写（Linux 权限 0600）。每个接口只读取自己的凭据，页面不读取文件内容。</p>
+    </details>`;
+  }).join('')}</details>`).join('');
+  root.querySelectorAll('[data-capability]').forEach(card=>toggleCapabilityFields('cap-'+card.dataset.capability+'-'+card.dataset.realm));
+}
+function toggleCapabilityFields(id){
+  const enabled = document.getElementById(id+'-enabled').checked;
+  const auth = document.getElementById(id+'-auth').value;
+  for(const key of ['base_url','auth','timeout_seconds','key_file','header_name']){
+    const input = document.getElementById(id+'-'+key);
+    input.disabled = !enabled || (key==='key_file' && !['bearer','header'].includes(auth)) || (key==='header_name' && auth!=='header');
+    input.required = enabled && (key==='base_url' || key==='key_file' && ['bearer','header'].includes(auth) || key==='header_name' && auth==='header');
+  }
+}
+async function saveCapabilitySources(button){
+  button.disabled = true;
+  try{
+    const capabilities = {};
+    document.querySelectorAll('#setCapabilitySources [data-capability]').forEach(card=>{
+      const kind=card.dataset.capability, realm=card.dataset.realm, id='cap-'+kind+'-'+realm;
+      const value = {enabled:document.getElementById(id+'-enabled').checked};
+      for(const key of ['base_url','auth','key_file','header_name','timeout_seconds']){
+        const input=document.getElementById(id+'-'+key);
+        if(!input.disabled && !input.reportValidity()) throw new Error('请检查接口配置中的必填项');
+        value[key]=key==='timeout_seconds'?Number(input.value):input.value.trim();
+      }
+      (capabilities[kind] ||= {})[realm]=value;
+    });
+    const saved = await postJSON('/settings/save',{upstream:{capabilities}});
+    renderCapabilitySources(saved.upstream);
+    document.getElementById('setCapabilityState').textContent='已保存';
+    toast('接口配置已保存','ok');
+  }catch(error){toast('保存失败: '+error.message,'bad');}
+  finally{button.disabled=false;}
+}
+
 async function loadSettings(showToast){
   try {
     const data = await getJSON('/settings');
+    renderCapabilitySources(data.upstream);
     const pwdState = document.getElementById('setPwdState');
     if(pwdState){
       pwdState.textContent = data.panel_password_is_default ? '(当前为默认密码)' : '(已自定义)';
