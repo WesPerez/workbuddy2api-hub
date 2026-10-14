@@ -1,6 +1,8 @@
 # 核心机密数据（千万不能上传到公共仓库）
 accounts/*.json
 accounts/agent-backups/
+# Public last-good model catalogue is runtime state, never a release input.
+accounts/catalog-cache/
 !accounts/README.txt
 
 # 运行时日志和用量统计

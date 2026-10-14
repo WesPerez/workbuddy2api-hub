@@ -54,6 +54,7 @@ wb_pricing.py
 wb_probes.py
 wb_prompt.py
 wb_proxy.py
+wb_resin.py
 wb_scheduler.py
 wb_settings.py
 wb_tasks.py

@@ -13,6 +13,7 @@ from _isolated_dirs import isolated_data_dirs
 _TMP = isolated_data_dirs("wb-catalog-recovery-")
 import wb_accounts as A
 import wb_proxy as P
+P.ACCOUNTS_DIR = os.environ["ACCOUNTS_DIR"]
 
 
 class CatalogRecoveryTests(unittest.TestCase):
