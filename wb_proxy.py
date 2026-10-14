@@ -63,6 +63,7 @@ import wb_activity
 import wb_atrest
 import wb_catalog
 import wb_egress
+import wb_resin
 import wb_ipintel
 import wb_pricing
 import wb_settings
@@ -482,15 +483,26 @@ def _extract_usage(usage):
     """Normalize the upstream usage block into the fields we track."""
     if not usage:
         return {}
-    details = usage.get("completion_tokens_details") or {}
+    reasoning = _reasoning_usage(usage)
     return {
         "prompt_tokens": usage.get("prompt_tokens") or 0,
         "completion_tokens": usage.get("completion_tokens") or 0,
-        "reasoning_tokens": details.get("reasoning_tokens") or 0,
+        "reasoning_tokens": reasoning,
+        "reasoning_tokens_source": usage.get("reasoning_tokens_source", "upstream") if reasoning is not None else "not_reported",
         "cached_tokens": _best_cached_tokens(usage),
         "total_tokens": usage.get("total_tokens") or 0,
         "credit": usage.get("credit") or 0,
     }
+
+
+def _reasoning_usage(usage):
+    for block in (usage.get("completion_tokens_details"), usage.get("output_tokens_details"), usage):
+        if not isinstance(block, dict):
+            continue
+        value = block.get("reasoning_tokens")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return None
 def row_realm(row):
     """The realm a log row belongs to.
 
@@ -9966,23 +9978,25 @@ CN_UI_ORDER = [
     "deepseek-v4-pro",
 ]
 INTL_UI_ORDER = [
-    "hy4-preview-f",
     "hy3",
+    "step-5-preview",
     "deepseek-v4.1-flash",
-    "gpt-6-astra",
-    "gpt-5.6-sol",
+    "gpt-6.1-sol",
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
     "gpt-5.5",
     "gpt-5.4",
     "grok-4.7",
+    "gemini-3.8-flash",
     "gemini-3.5-flash",
     "glm-5.3-flash",
     "glm-5.3",
     "glm-5.2",
     "kimi-k3",
     "kimi-k2.6",
-    "kimi-k2.8-preview",
+    "kimi-k2.8-preview"
 ]
 def merge_reasoning(base, live):
     """Field-level merge of one model's reasoning block.
@@ -10017,7 +10031,10 @@ def merge_catalog(primary, realm=None, extras=False):
         mid = item.get("id")
         # First catalog wins for a shared id, so the intl entry is not
         # overwritten by its cn counterpart when both are merged.
-        if mid and is_chat_model(mid) and mid not in merged:
+        # A full product catalogue owns membership. Bundled data can fill a
+        # listed model's fields but cannot resurrect a removed model.
+        if (mid and is_chat_model(mid) and mid not in merged
+                and (not extras or mid in dict(primary or []))):
             merged[mid] = dict(item)
     for mid, meta in primary or []:
         if not is_chat_model(mid):
@@ -10026,11 +10043,15 @@ def merge_catalog(primary, realm=None, extras=False):
             base = merged.get(mid) or {}
             base_reasoning = base.get("reasoning")
             base.update(meta)
+            if extras and not meta.get("credits"):
+                base.pop("credits", None)
             if isinstance(meta.get("reasoning"), dict):
                 base["reasoning"] = merge_reasoning(base_reasoning, meta["reasoning"])
             merged[mid] = base
         elif mid not in merged:
             merged[mid] = {}
+        elif extras:
+            merged[mid].pop("credits", None)
     order = CN_UI_ORDER if r == "cn" else INTL_UI_ORDER
     out = []
     if r == "all":
@@ -10086,6 +10107,11 @@ def note_bundled_reasoning(realm, live, entries):
         "catalogue omits for %d model(s): %s" % (len(missing), shown))
 def fetch_models(realm=None):
     r = realm or CURRENT_REALM
+    if r == "all":
+        first = fetch_models("intl")
+        second = fetch_models("cn")
+        known = {mid for mid, _ in first}
+        return first + [(mid, meta) for mid, meta in second if mid not in known]
     with _lock:
         c = _models_cache.get(r) or {"at": 0.0, "data": None}
         if c["data"] and time.time() - c["at"] < 300:
@@ -10099,16 +10125,33 @@ def fetch_models(realm=None):
             if c["data"] and time.time() - c["at"] < 300:
                 return c["data"]
         live, extras = curated_live_sources(r)
+        info = dict(_catalog_sources.get(r) or {})
+        # A failed refresh must not discard the last complete membership or
+        # reintroduce deleted names from a static/narrow fallback.
+        if not extras and c.get("data") and c.get("catalog", {}).get("complete"):
+            with _lock:
+                _models_cache[r] = {**c, "at": time.time(), "catalog": {
+                    **c["catalog"], "stale": True, "lastAttemptAt": time.time()}}
+            return c["data"]
         if not live and r in ("intl", "all"):
             # The narrow endpoint is not the desktop catalogue, so it keeps the
             # old whitelist behaviour: only names the order table knows.
             live = [(m, {}) for m in fetch_endpoint_models()]
             extras = False
+            info = {"source": "bundled_and_narrow", "stale": True}
         entries = merge_catalog(live, realm=r, extras=extras)
         note_bundled_reasoning(r, live, entries)
         with _lock:
-            _models_cache[r] = {"at": time.time(), "data": entries}
+            _models_cache[r] = {"at": time.time(), "data": entries, "catalog": {
+                **info, "complete": extras, "count": len(entries), "cacheSeconds": 300,
+                "lastAttemptAt": time.time(), "availability": "upstream_catalog_not_per_model_probe"}}
         return entries
+
+
+def catalog_status(realm):
+    if realm == "all":
+        return {r: catalog_status(r) for r in ("intl", "cn")}
+    return dict((_models_cache.get(realm) or {}).get("catalog") or {})
 def model_entry(mid, meta):
     """Build a rich /v1/models entry from the desktop app catalog metadata.
     The OpenAI spec only names id/object/created/owned_by, so capability data is
@@ -10343,6 +10386,8 @@ def parse_remote_catalog(payload):
     """
     if not isinstance(payload, dict):
         return None
+    if "code" in payload and payload["code"] not in (0, "0"):
+        return None
     cli_lists, other_lists = _agent_model_lists(payload)
     pool = cli_lists or other_lists
     best = max(pool, key=len) if pool else None
@@ -10400,16 +10445,14 @@ def curate_remote_catalog(realm, ids, meta=None):
         carries;
       - when a free ("x0.00") sibling exists, the free one is the one the
         picker shows, so the paid sibling is dropped;
-      - everything else keeps its upstream order. Names the upstream does not
-        list at all stay available through the curated order tables and the
-        bundled snapshot, which merge_catalog() keeps.
+      - everything else keeps its upstream order. A removed sibling cannot
+        hide a currently listed model; complete catalogues own membership.
     """
     credits = snapshot_credits()
     for mid, item in (meta or {}).items():
         if isinstance(item, dict):
             credits[mid] = str(item.get("credits") or "").strip().lower()
-    order = CN_UI_ORDER if realm == "cn" else INTL_UI_ORDER
-    known = set(ids) | set(credits) | set(order)
+    known = set(ids)
 
     def free(mid):
         return credits.get(mid) in ("x0.00", "x0", "0", "0.00")
@@ -10440,8 +10483,8 @@ def fetch_remote_product_config(realm):
     """
     if realm not in ("intl", "cn") or POOL is None:
         return None
-    account = POOL.representative(realm=realm)
-    if account is None or not account.access_token:
+    candidates = POOL.representatives(realm=realm)
+    if not candidates:
         log("remote catalog: no usable %s account, skipping" % realm)
         return None
     cfg = wb_accounts.get_realm_config(realm)
@@ -10452,19 +10495,26 @@ def fetch_remote_product_config(realm):
     if cfg.get("billing_ua") and cfg["billing_ua"] != cfg["chat_ua"]:
         uas.append(cfg["billing_ua"])
     last = None
+    deadline = time.monotonic() + 24
+    # Try every account before changing UA. One broken first account must not
+    # consume both attempts or decide the entire gateway's model catalogue.
     for ua in uas:
-        headers, request_proxy = account.request_snapshot(header_factory=lambda: remote_config_headers(account, realm, ua))
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        try:
-            with wb_accounts.urlopen(req, timeout=10, proxy=request_proxy) as resp:
-                payload = json.loads(resp.read().decode("utf-8", "replace"))
-        except Exception as exc:
-            last = exc
-            continue
-        parsed = parse_remote_catalog(payload)
-        if parsed:
-            return parsed
-        last = "empty catalogue"
+        for account in candidates:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                headers, request_proxy = account.request_snapshot(header_factory=lambda: remote_config_headers(account, realm, ua))
+                req = urllib.request.Request(url, headers=headers, method="GET")
+                with wb_accounts.urlopen(req, timeout=min(6, remaining), proxy=request_proxy) as resp:
+                    payload = json.loads(resp.read().decode("utf-8", "replace"))
+            except Exception as exc:
+                last = type(exc).__name__
+                continue
+            parsed = parse_remote_catalog(payload)
+            if parsed:
+                return parsed
+            last = "empty catalogue"
     log("remote catalog: %s fetch failed (%s)" % (realm, last))
     return None
 
@@ -10497,6 +10547,41 @@ def read_cached_remote_catalog(realm):
     return parse_remote_catalog(payload)
 
 
+_catalog_sources = {}
+
+
+def saved_catalog(realm, source=None):
+    """Persist only public model metadata, never authenticated config payloads."""
+    path = os.path.join(ACCOUNTS_DIR, "catalog-cache", realm + ".json")
+    if source is not None:
+        ids, meta = source
+        fields = {"id", "name", "descriptionEn", "descriptionZh", "credits", "maxInputTokens",
+                  "maxOutputTokens", "maxAllowedSize", "supportsImages", "supportsToolCall",
+                  "supportsReasoning", "onlyReasoning", "disabledMultimodal", "reasoning",
+                  "contextWindow", "relatedModels", "temperature", "top_p", "vendor"}
+        value = {"fetchedAt": time.time(), "ids": ids,
+                 "meta": {mid: {k: v for k, v in item.items() if k in fields}
+                          for mid, item in meta.items() if mid in ids and isinstance(item, dict)}}
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path + ".tmp", "w", encoding="utf-8") as stream:
+                json.dump(value, stream, ensure_ascii=False)
+            os.replace(path + ".tmp", path)
+        except OSError:
+            log("remote catalog: public snapshot could not be saved")
+        return value
+    try:
+        with open(path, encoding="utf-8") as stream:
+            value = json.load(stream)
+        if (not isinstance(value, dict) or not isinstance(value.get("ids"), list)
+                or not all(isinstance(mid, str) for mid in value["ids"])
+                or not value["ids"] or not isinstance(value.get("meta"), dict)):
+            return None
+        return value
+    except (OSError, ValueError):
+        return None
+
+
 def curated_live_sources(realm):
     """(entries, extras) for the realm's live catalogue, already curated.
 
@@ -10511,7 +10596,10 @@ def curated_live_sources(realm):
         remote = fetch_remote_product_config(realm)
     except Exception as exc:
         log("remote catalog: %s failed (%s)" % (realm, exc))
-    source = remote or read_cached_remote_catalog(realm)
+    saved = saved_catalog(realm, remote) if remote else saved_catalog(realm)
+    source = remote or ((saved["ids"], saved["meta"]) if saved else None) or read_cached_remote_catalog(realm)
+    _catalog_sources[realm] = {"source": "upstream" if remote else "last_good" if saved else "desktop_cache" if source else "bundled",
+        "stale": not bool(remote), "fetchedAt": saved.get("fetchedAt") if saved else None}
     if source:
         ids, meta = source
         return ([(mid, meta.get(mid) or {})
@@ -12544,10 +12632,10 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         else:
             attempt_body = upstream_body
         attempt_data = json.dumps(attempt_body, ensure_ascii=False).encode("utf-8")
-        headers, request_proxy = account.request_snapshot()
-        req = urllib.request.Request(chat_url, data=attempt_data, method="POST",
-                                     headers=headers)
+        request_proxy = None
         try:
+            headers, request_proxy = account.request_snapshot()
+            req = urllib.request.Request(chat_url, data=attempt_data, method="POST", headers=headers)
             resp = wb_accounts.urlopen(req, timeout=header_timeout,
                                        proxy=request_proxy)
             _apply_stream_idle_timeout(resp, idle_timeout)
@@ -12723,6 +12811,18 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         except Exception as exc:
             if session_key and POOL:
                 POOL.affinity.demote(session_key, account.uid)
+            if isinstance(exc, wb_resin.RouteUnavailable) or (
+                    isinstance(request_proxy, wb_resin.ManagedProxy)
+                    and (wb_resin.guard_rejected(exc) or wb_resin.transport_failure(exc))):
+                # Route recovery/backoff belongs to the lease, not the user's
+                # credential. Never turn a stale guard into a 30-minute breaker.
+                last_error = exc
+                log("account %s: managed route unavailable (%s)" % (account.uid[:8], type(exc).__name__))
+                if wb_resin.transport_failure(exc) and not wb_resin.guard_rejected(exc):
+                    # An uncertain POST must not be sent on another account;
+                    # recovery is applied to the next client request instead.
+                    break
+                continue
             if is_transient(exc):
                 transient_hits += 1
                 if egress_backoff:
@@ -12985,7 +13085,8 @@ def aggregate_stream(raw_iter, model, resp_id):
                 "prompt_tokens": prompt_est,
                 "completion_tokens": comp,
                 "total_tokens": prompt_est + comp,
-                "completion_tokens_details": {"reasoning_tokens": estimate_tokens(full_r)},
+                "completion_tokens_details": {"reasoning_tokens": estimate_tokens(full_r)} if full_r else {},
+                "reasoning_tokens_source": "estimated" if full_r else "not_reported",
                 "prompt_tokens_details": {"cached_tokens": 0},
             }
     out = {
@@ -14542,7 +14643,8 @@ def _responses_usage(u):
             or det.get("cached_tokens") or pdet.get("cached_tokens") or 0,
         },
         "output_tokens": u.get("completion_tokens") or 0,
-        "output_tokens_details": {"reasoning_tokens": det.get("reasoning_tokens") or 0},
+        "output_tokens_details": ({"reasoning_tokens": _reasoning_usage(u)}
+                                  if _reasoning_usage(u) is not None else {}),
         "total_tokens": u.get("total_tokens") or 0,
     }
 def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, namespace_map=None, sources=None):
@@ -14911,7 +15013,8 @@ def stream_responses_events(upstream, model, holder):
                     "prompt_tokens": prompt_est,
                     "completion_tokens": comp,
                     "total_tokens": prompt_est + comp,
-                    "completion_tokens_details": {"reasoning_tokens": estimate_tokens(rs_txt)},
+                    "completion_tokens_details": {"reasoning_tokens": estimate_tokens(rs_txt)} if rs_txt else {},
+                    "reasoning_tokens_source": "estimated" if rs_txt else "not_reported",
                     "prompt_tokens_details": {"cached_tokens": 0},
                 }
                 holder["usage"] = usage
@@ -15888,7 +15991,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
         data = [model_entry(mid, meta) for mid, meta in entries]
-        return self._json(200, {"object": "list", "data": data, "realm": req_realm or CURRENT_REALM})
+        return self._json(200, {"object": "list", "data": data, "realm": req_realm or CURRENT_REALM,
+                                "catalog": catalog_status(req_realm)})
 
     def _get_v1_usage(self, query):
         if not self._authorized():
@@ -18571,7 +18675,8 @@ class Handler(BaseHTTPRequestHandler):
                         "prompt_tokens": max(1, comp // 2),
                         "completion_tokens": comp,
                         "total_tokens": max(1, comp // 2) + comp,
-                        "completion_tokens_details": {"reasoning_tokens": 0},
+                        "completion_tokens_details": {},
+                        "reasoning_tokens_source": "not_reported",
                         "prompt_tokens_details": {"cached_tokens": 0},
                     }
             record_usage(model, last_usage, stream=True,

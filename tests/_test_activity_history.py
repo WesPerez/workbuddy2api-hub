@@ -25,6 +25,8 @@ _TMP = isolated_data_dirs("wb-activity-")
 os.environ["WB_INTERNATIONAL_DAILY_CHAT"] = "1"
 
 import wb_accounts
+# Exercise retained legacy protocol/history in isolation, never production opt-in.
+wb_accounts.wb_bridge.daily_enabled = lambda: True
 import wb_activity
 import wb_proxy
 import wb_scheduler
@@ -398,9 +400,9 @@ class SchedulerRecordingTests(IsolatedCase):
             scheduler._run_cycle("测试第二轮")
 
         rows = self.rows()
-        self.assertEqual(first_round, 2, "两个到期账号各记一行")
-        self.assertEqual(len(rows), 2, "已完成的账号第二轮不该刷出假成功")
-        self.assertEqual(sorted(r["task"] for r in rows), ["checkin", "daily_chat"])
+        self.assertEqual(first_round, 1, "只运行国内签到；国际自动活跃已移除")
+        self.assertEqual(len(rows), 1, "已完成的账号第二轮不该刷出假成功")
+        self.assertEqual(sorted(r["task"] for r in rows), ["checkin"])
         self.assertTrue(all(r["trigger"] == "scheduler" for r in rows))
         self.assertEqual(len(calls), 1, "只有真正到期的那个账号签了一次")
 

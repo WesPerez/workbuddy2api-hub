@@ -204,20 +204,8 @@ class Scheduler:
                         self.log(f"🌙 {line}")
                     time.sleep(1.0)
 
-            # 3. 如果是国际版账号，检查每日活跃对话 (送 30/50 积分福利)
-            if acc.realm == "intl" and wb_bridge.daily_enabled():
-                if acc.can_daily_chat():
-                    self.log(f"检测到国际版账号 [{uid8}] 今日尚未活跃，执行每日活跃打卡对话...")
-                    res = acc.daily_chat(trigger="scheduler")
-                    if res.get("ok"):
-                        daily_chat_count += 1
-                        # 桌面端那条几乎不会失败，真正决定积分的网页通道就在 msg
-                        # 里（completed：N 段输出 / 失败原因），日志不带上它的话，
-                        # 面板只显示「成功」，第二天才发现积分没到（issue #236）。
-                        self.log(f"✓ 账号 [{uid8}] 每日活跃对话成功: {res.get('msg')}")
-                    else:
-                        self.log(f"! 账号 [{uid8}] 每日活跃对话失败: {res.get('error') or res.get('msg')}")
-                    time.sleep(1.5)
+            # International rewards require the real client. API/web automation
+            # is not scheduled, even when an older installation opted in.
 
         self.log(f"巡检完成：Token保活 {refreshed_count} 个，国内签到 {checkin_count} 个，活跃上报 {report_count} 个，猫猫日常 {travel_count} 个，国际活跃 {daily_chat_count} 个")
 

@@ -79,7 +79,7 @@ check('cn glm-5.2 keeps the night note', cell.includes('(夜间0.5x)'), cell);
 cell = creditsCell({id: 'glm-5.2'});
 check('cn glm-5.2 without credits shows no number', !cell.includes('0.79x'), cell);
 check('cn glm-5.2 without credits falls back to the dash',
-      cell.trim() === '-', cell);
+      cell.includes('未提供'), cell);
 cell = creditsCell({id: 'deepseek-v4-pro'});
 check('cn deepseek-v4-pro without credits invents nothing',
       !cell.includes('0.79x'), cell);
@@ -87,9 +87,9 @@ check('cn deepseek-v4-pro without credits invents nothing',
 // 4. No credits at all: a dash, never a guessed number.
 window.VIEW_REALM = 'intl';
 cell = creditsCell({id: 'gpt-5.5'});
-check('a model without credits shows the dash', cell.trim() === '-', cell);
+check('a model without credits shows the dash', cell.includes('未提供'), cell);
 cell = creditsCell({id: 'gpt-5.5', credits: ''});
-check('an empty credits string shows the dash', cell.trim() === '-', cell);
+check('an empty credits string shows the dash', cell.includes('未提供'), cell);
 
 // 5. Odd but plausible shapes still follow the value.
 cell = creditsCell({id: 'hy3', credits: '  x1.33 '});
