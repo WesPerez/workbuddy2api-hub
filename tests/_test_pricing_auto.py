@@ -70,6 +70,9 @@ class PricingTestCase(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="wb-price-auto-case-")
         self.accounts = os.path.join(self.dir, "accounts")
         os.makedirs(self.accounts, exist_ok=True)
+        accounts_dir = unittest.mock.patch.object(P, "ACCOUNTS_DIR", self.accounts)
+        accounts_dir.start()
+        self.addCleanup(accounts_dir.stop)
         self._previous_dir = wb_pricing.data_dir()
         self._previous_settings = wb_pricing._settings_dir_override
         wb_pricing.set_data_dir(self.dir)
