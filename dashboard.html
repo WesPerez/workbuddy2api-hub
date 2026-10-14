@@ -728,6 +728,32 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
   var ATTRS = ['title', 'placeholder', 'aria-label', 'data-label', 'alt'];
   var SKIP = {SCRIPT: 1, STYLE: 1, TEXTAREA: 1, NOSCRIPT: 1};
   var DICT = {
+    "每日 30 / 50 积分需在 WorkBuddy / CodeBuddy 客户端有效对话，通常次日自动入账，无需手动领取。网页与 API 调用不计入。": "Earn daily 30 / 50 credits through a valid conversation in the WorkBuddy / CodeBuddy client. Rewards usually arrive the next day automatically. Web and API calls do not count.",
+    "国际版不提供自动积分任务。请在官方客户端有效对话，通常次日自动到账；本页只同步上游积分流水。": "Global rewards require a valid conversation in the official client and usually arrive the next day. This page only syncs upstream credit records.",
+    "客户端活跃状态": "Client activity status",
+    "已同步 Bonus Pack 积分": "Synced Bonus Pack credits",
+    "官方积分规则": "Official reward terms",
+    "国际版积分规则": "Global reward terms",
+    "无法从 API 判断，请以官方客户端为准": "Cannot determine via API; check the official client",
+    "未上报": "Not reported",
+    "未提供": "Not provided",
+    "本机动作": "Local action",
+    "本机动作不代表官方客户端活跃或积分资格。": "Local actions do not establish official client activity or reward eligibility.",
+    "上游未上报推理 Token；不代表未思考": "Upstream did not report reasoning tokens; this does not mean reasoning was disabled",
+    "历史数据无法区分未上报与真实 0": "Historical data cannot distinguish missing usage from an explicit zero",
+    "根据已返回的推理文本估算": "Estimated from returned reasoning text",
+    "缓存 / 降级目录": "Cached / fallback catalog",
+    "上游目录": "Upstream catalog",
+    "刷新时间未知": "Refresh time unknown",
+    " · 最长缓存 5 分钟 · ": " · Cached for up to 5 minutes · ",
+    " · 目录收录不代表每个账号即时可用；倍率缺失时显示未提供": " · Catalog membership does not guarantee per-account availability; missing rates are shown as not provided",
+    "每账号独立租约，故障自动恢复": "Independent account lease with automatic recovery",
+    "受保护登录出口": "Protected login egress",
+    "等待核验": "Awaiting verification",
+    "受管出口": "Managed egress",
+    "等待租约": "Awaiting lease",
+    "WB / VSC / CLI 是上游协议身份与指纹，不代表实际客户端活跃。代理策略池与 IP 请看账号的「出口」列。": "WB / VSC / CLI are protocol identities and fingerprints, not proof of client activity. The Egress column shows the proxy pool and IP.",
+    "其它来源：新用户赠送、套餐月度积分、官方邀请活动、兑换码与付费充值；具体资格和金额以官方页面为准。Bonus Pack 为上游包名，不能据此确认是哪次本机动作触发。": "Other sources include new-user grants, monthly plan credits, official invitations, redemption codes and paid top-ups. Eligibility and amounts follow official terms. A Bonus Pack does not identify which local action triggered it.",
     '(不限)': '(unlimited)',
     '(仅桌面端对话)': '(desktop chats only)',
     '(低于': '(below',
@@ -899,7 +925,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '出口已更新': 'Exit updated',
     '出口更新失败:': 'Updating the exit failed:',
     '出口绑定': 'Exit binding',
-    '出站身份：WB = WorkBuddy 独立桌面客户端（默认），VSC = 官方 VSCode 插件，CLI = 官方 CodeBuddy CLI；三者对应不同的出站指纹与配额通道。': 'Outbound identity: WB = WorkBuddy standalone desktop client (default), VSC = official VSCode extension, CLI = official CodeBuddy CLI; the three use different outbound fingerprints and quota channels.',
+    '出站身份：WB / VSC / CLI 是上游协议身份与指纹，不代表实际客户端活跃。代理策略池与 IP 请看账号的「出口」列。': 'Outbound identity: WB = WorkBuddy standalone desktop client (default), VSC = official VSCode extension, CLI = official CodeBuddy CLI; the three use different outbound fingerprints and quota channels.',
     '出站身份：默认 WorkBuddy 桌面端 (WB) / 官方 VSCode 插件 (VSC) / 官方 CodeBuddy CLI (CLI)': 'Outbound identity: default WorkBuddy desktop (WB) / official VSCode extension (VSC) / official CodeBuddy CLI (CLI)',
     '出站身份：': 'Outbound identity:',
     '分配代理出口给未绑定账号': 'Assign proxy exits to unbound accounts',
@@ -1884,7 +1910,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "全部账号": "全部帳號",
     "内置": "內建",
     "出口绑定": "出口繫結",
-    "出站身份：WB = WorkBuddy 独立桌面客户端（默认），VSC = 官方 VSCode 插件，CLI = 官方 CodeBuddy CLI；三者对应不同的出站指纹与配额通道。": "出站身份：WB = WorkBuddy 獨立桌面客戶端（預設），VSC = 官方 VSCode 外掛，CLI = 官方 CodeBuddy CLI；三者對應不同的出站指紋與配額通道。",
+    "出站身份：WB / VSC / CLI 是上游协议身份与指纹，不代表实际客户端活跃。代理策略池与 IP 请看账号的「出口」列。": "出站身份：WB = WorkBuddy 獨立桌面客戶端（預設），VSC = 官方 VSCode 外掛，CLI = 官方 CodeBuddy CLI；三者對應不同的出站指紋與配額通道。",
     "出站身份：默认 WorkBuddy 桌面端 (WB) / 官方 VSCode 插件 (VSC) / 官方 CodeBuddy CLI (CLI)": "出站身份：預設 WorkBuddy 桌面端 (WB) / 官方 VSCode 外掛 (VSC) / 官方 CodeBuddy CLI (CLI)",
     "出站身份：": "出站身份：",
     "分配代理出口给未绑定账号": "分配代理出口給未繫結帳號",
@@ -2997,6 +3023,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <h2 style="margin:0">网关模型清单<em id="modelsRealmTag" style="color:var(--dim);font-weight:500"></em><em id="availModelCount"></em></h2>
       <div style="font-size:12px;color:var(--dim)">展示当前视图下官方对话大模型、上下文容量、推理/视觉能力及在售倍率</div>
     </div>
+    <div id="catalogStatus" style="font-size:12px;color:var(--dim);margin-bottom:12px"></div>
     <div style="overflow-x:auto">
       <table id="modelsTable" class="data-cards">
         <thead>
@@ -3122,19 +3149,20 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
       <div>
         <h2 style="margin:0">国际版每日活跃福利</h2>
-        <div style="font-size:12px;color:var(--dim)">国际版每日轻量会话与网页通道打卡，触发官方发放每日活跃 Bonus Pack (+30/+50 积分)</div>
+        <div style="font-size:12px;color:var(--dim)">每日 30 / 50 积分需在 WorkBuddy / CodeBuddy 客户端有效对话，通常次日自动入账，无需手动领取。网页与 API 调用不计入。</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <button class="primary" id="btnPageDailyChat" onclick="doDailyChat(this)">每日活跃打卡 (国际版)</button>
+        <a class="primary" href="https://www.workbuddy.ai/docs/workbuddy/Subscription#limited-time-daily-activity-reward-terms" target="_blank" rel="noopener noreferrer">官方积分规则</a>
       </div>
     </div>
+    <p style="font-size:12px;color:var(--dim)">其它来源：新用户赠送、套餐月度积分、官方邀请活动、兑换码与付费充值；具体资格和金额以官方页面为准。Bonus Pack 为上游包名，不能据此确认是哪次本机动作触发。</p>
     <div class="cards" style="margin-bottom:16px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">
       <div class="card accent2">
-        <div class="k">今日活跃打卡状态</div>
+        <div class="k">客户端活跃状态</div>
         <div class="v" id="intlTodayActiveState" style="font-size:20px">-</div>
       </div>
       <div class="card warn">
-        <div class="k">累计活跃奖励积分</div>
+        <div class="k">已同步 Bonus Pack 积分</div>
         <div class="v" id="intlTotalGranted" style="color:var(--warn)">-</div>
       </div>
     </div>
@@ -3762,12 +3790,12 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
-            <h2 style="margin:0">国际版每日活跃打卡 <em id="setDailyChatWebState"></em></h2>
+            <h2 style="margin:0">国际版积分规则 <em id="setDailyChatWebState" style="display:none"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              国际版账号每日打卡时，除桌面端身分的轻量对话外，再走一次网页通道的会话。默认开启。
+              国际版不提供自动积分任务。请在官方客户端有效对话，通常次日自动到账；本页只同步上游积分流水。
             </div>
           </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+          <div style="display:none;gap:8px;flex-wrap:wrap;align-items:flex-end">
             <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
               <input id="setDailyChatWeb" type="checkbox" style="width:16px;height:16px">
               走网页通道
@@ -4527,6 +4555,11 @@ async function loadModels(){
   try{
     const r = await getJSON('/v1/models?realm=' + encodeURIComponent(window.VIEW_REALM));
     MODELS_DATA = r.data || [];
+    const info = r.catalog || {};
+    const status = document.getElementById('catalogStatus');
+    if(status) status.textContent = (info.stale ? '缓存 / 降级目录' : '上游目录')
+      + ' · 最长缓存 5 分钟 · ' + (info.fetchedAt ? new Date(info.fetchedAt * 1000).toLocaleString() : '刷新时间未知')
+      + ' · 目录收录不代表每个账号即时可用；倍率缺失时显示未提供';
     renderAvailableModels();
   }catch(e){
     console.error('loadModels error:', e);
@@ -4548,7 +4581,7 @@ function renderAvailableModels(){
     //    国际版 deepseek-v4.1-flash 三个"限时免费"，与 credits 值是 OR 关系，
     //    上游一旦调价面板会继续宣传免费；cn 的夜间注记在 credits 缺失时还会
     //    兜底显示写死的 0.79x。现在取不到就不显示数字。
-    let credBadge = '-';
+    let credBadge = '<span style="color:var(--dim)">未提供</span>';
     const credText = (m.credits == null ? '' : String(m.credits)).trim();
     const c = credText.toLowerCase().replace('x', '');
     if(c === '0.00' || c === '0'){
@@ -4676,7 +4709,8 @@ async function loadGrowthTasks(){
   loadIntlTasks();
   const sec = document.getElementById("sectionGrowthTasks");
   if(!sec) return;
-  sec.style.display = 'block';
+  sec.style.display = window.VIEW_REALM === 'cn' ? 'block' : 'none';
+  if(window.VIEW_REALM !== 'cn') return;
   try{
     const q = (CURRENT_GROWTH_UID && CURRENT_GROWTH_UID !== 'all') ? ('?uid=' + encodeURIComponent(CURRENT_GROWTH_UID)) : '';
     const r = await getJSON('/tasks' + q);
@@ -4938,36 +4972,21 @@ async function doCheckin(btn){
 }
 
 async function doDailyChat(btn){
-  btn.disabled = true; const ot = btn.textContent; btn.textContent = "打卡中...";
-  try {
-    const r = await postJSON("/accounts/daily-chat", {});
-    const res = r.results || [];
-    if(!res.length) toast("未发现国际版账号", "warn");
-    else {
-      const summary = res.map(x => (x.nickname||x.uid.slice(0,6)) + ": " + (x.ok ? "活跃打卡成功" : (x.error||x.msg))).join("；");
-      toast("每日活跃: " + summary, res.some(x => x.ok) ? "ok" : "warn");
-    }
-    await refreshActiveRealm(); window.updateUI(); loadAccounts(); loadModels();
-  }catch(e){ toast("打卡失败: " + e.message, "bad"); }
-  finally { btn.disabled = false; btn.textContent = ot; }
+  toast('国际版奖励需在官方客户端有效对话；API 与网页不计入，通常次日自动到账', 'warn');
 }
 
-/* 网页通道打卡：只建网页端会话（官方每日活跃只认网页端对话）。
- * 会真的起一次任务、消耗该账号少量积分，所以先确认一次。 */
+/* 兼容旧入口：国际版自动积分任务已停用。 */
 async function doDailyChatWeb(btn){
-  if(!confirm('将为每个已启用的国际版账号各建一个网页端会话。\n\n这会真的起一次任务并消耗该账号少量积分，用于计入官方「每日活跃」。继续？')) return;
-  btn.disabled = true; const ot = btn.textContent; btn.textContent = "打卡中...";
-  try {
-    const r = await postJSON("/accounts/daily-chat-web", {});
-    const res = r.results || [];
-    if(!res.length) toast("未发现国际版账号", "warn");
-    else {
-      const summary = res.map(x => (x.nickname||x.uid.slice(0,6)) + ": " + (x.ok ? ("已建会话 " + (x.conversation||"")) : (x.error||"失败"))).join("；");
-      toast("网页通道打卡: " + summary, res.some(x => x.ok) ? "ok" : "warn");
-    }
-    await refreshActiveRealm(); window.updateUI(); loadAccounts(); loadModels();
-  }catch(e){ toast("网页通道打卡失败: " + e.message, "bad"); }
-  finally { btn.disabled = false; btn.textContent = ot; }
+  toast('国际版奖励需在官方客户端有效对话；API 与网页不计入，通常次日自动到账', 'warn');
+}
+
+function reasoningTokenCell(row){
+  const n = row.reasoning_tokens;
+  const source = row.reasoning_tokens_source;
+  if(n == null || source === 'not_reported') return '<span title="上游未上报推理 Token；不代表未思考">未上报</span>';
+  if(n === 0 && !source) return '<span title="历史数据无法区分未上报与真实 0">未知</span>';
+  if(source === 'estimated') return '<span title="根据已返回的推理文本估算">≈' + fmt(n) + '</span>';
+  return fmt(n);
 }
 
 const fmt = n => (n ?? 0).toLocaleString('en-US');
@@ -5764,7 +5783,7 @@ function activityStatusOf(a){
   const uid = String((a && a.uid) || '');
   const isCn = (a && a.realm) === 'cn';
   if(!isCn){
-    const label = '今日活跃';
+    const label = '本机动作';
     const done = a && a.lastDailyChat;
     const event = ACTIVITY_TODAY.byUid[uid];
     if(event){
@@ -5811,11 +5830,11 @@ function activityStatusChip(a){
     const cls = status.kind === 'ok' ? 'badge ok'
               : status.kind === 'failed' ? 'badge bad'
               : status.kind === 'done' ? 'badge ok' : 'badge off';
-    const tip = status.kind === 'none'
+    const tip = '本机动作不代表官方客户端活跃或积分资格。' + (status.kind === 'none'
       ? status.label + '：今天还没有记录（没有记录不等于失败）'
       : (status.label + '：' + status.state
          + (status.at ? ' · ' + status.at : '')
-         + (status.message ? ' · ' + status.message : ''));
+         + (status.message ? ' · ' + status.message : '')));
     return '<span class="' + cls + '" style="cursor:pointer" title="' + esc(tip) + '"'
       + ' onclick="openActivityHistory(&quot;' + uidAttr + '&quot;)">'
       + esc(status.label + ' · ' + status.state) + '</span>';
@@ -5873,18 +5892,7 @@ function updateTaskPageCheckinCards(){
     if(!intlAccts.length){
       stateEl.textContent = '无国际账号';
     } else {
-      const isDone = a => {
-        const s = activityStatusOf(a);
-        return s.kind === 'ok' || s.kind === 'done';
-      };
-      const doneCount = intlAccts.filter(isDone).length;
-      if(doneCount === intlAccts.length){
-        stateEl.innerHTML = '<span style="color:#26bb82">今日已打卡 (' + doneCount + '/' + intlAccts.length + ')</span>';
-      } else if(doneCount > 0){
-        stateEl.innerHTML = '<span style="color:var(--accent)">部分已打卡 (' + doneCount + '/' + intlAccts.length + ')</span>';
-      } else {
-        stateEl.innerHTML = '<span style="color:var(--warn)">今日未打卡 (0/' + intlAccts.length + ')</span>';
-      }
+      stateEl.textContent = '无法从 API 判断，请以官方客户端为准';
     }
   }
 
@@ -6461,7 +6469,7 @@ function renderAccounts(){
     + '<th style="text-align:right;width:80px">缓存</th>'
     + '<th style="text-align:center;width:232px">操作</th>'
     + '</tr></thead><tbody>' + list.map(accountRow).join('') + '</tbody></table></div>'
-    + '<div class="legend"><span>出站身份：WB = WorkBuddy 独立桌面客户端（默认），VSC = 官方 VSCode 插件，CLI = 官方 CodeBuddy CLI；三者对应不同的出站指纹与配额通道。</span></div>'
+    + '<div class="legend"><span>出站身份：WB / VSC / CLI 是上游协议身份与指纹，不代表实际客户端活跃。代理策略池与 IP 请看账号的「出口」列。</span></div>'
     + '<div class="legend"><span>多个账号按会话粘性 + 轮询使用；某个账号被上游拒绝时自动切到下一个</span></div>';
   applyTableSort('accounts');
 }
@@ -7665,7 +7673,7 @@ async function refreshInner(gen){
         + '<td data-label="速度">' + (r.tokens_per_sec ? r.tokens_per_sec.toFixed(1) : '—') + '</td>'
         + '<td data-label="输入">' + fmt(r.prompt_tokens) + '</td>'
         + '<td data-label="输出">' + fmt(r.completion_tokens) + '</td>'
-        + '<td style="color:var(--think)" data-label="思考">' + fmt(r.reasoning_tokens) + '</td>'
+        + '<td style="color:var(--think)" data-label="思考">' + reasoningTokenCell(r) + '</td>'
         + '<td data-label="缓存">' + (r.cache_hit_pct!=null ? r.cache_hit_pct+'%' : '—') + '</td>'
         + '<td data-label="总 token"><b>' + fmt(r.total_tokens) + '</b></td>'
         + '<td data-label="积分" style="color:var(--accent2)">' + (r.credit != null ? Number(r.credit).toFixed(2) : '—') + '</td>'
@@ -9701,6 +9709,13 @@ let SLOTS_DIRTY = false;
 let SLOT_DISCOVER = [];
 
 function slotSelectHtml(a){
+  if(a.egress && a.loginSource){
+    const e = a.egress;
+    const tip = (e.policy === 'account_lease_auto_recovery' ? '每账号独立租约，故障自动恢复' : '受保护登录出口')
+      + ' · ' + (e.key || '') + ' · ' + (e.status || '等待核验');
+    return '<span title="' + esc(tip) + '"><b>' + esc(e.platform || '受管出口') + '</b><br>'
+      + '<span class="mono">' + esc(e.ip || '等待租约') + '</span></span>';
+  }
   const current = a.proxySlot || '';
   // A legacy per-account proxy URL still routes traffic while no slot is
   // bound. Surface it instead of pretending the account is direct.

@@ -21,6 +21,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _TMP = tempfile.mkdtemp(prefix="wb-remote-")
@@ -79,12 +80,15 @@ class RemoteCatalogTests(unittest.TestCase):
     def setUp(self):
         P._models_cache["intl"] = {"at": 0.0, "data": None}
         P._models_cache["cn"] = {"at": 0.0, "data": None}
+        self.saved = patch.object(P, "saved_catalog", return_value=None)
+        self.saved.start()
         self._orig = (P.fetch_remote_product_config,
                                 P.read_product_config_models,
                                 P.fetch_endpoint_models,
                                 P.product_config_path)
 
     def tearDown(self):
+        self.saved.stop()
         (P.fetch_remote_product_config, P.read_product_config_models,
          P.fetch_endpoint_models, P.product_config_path) = self._orig
 
@@ -118,11 +122,7 @@ class RemoteCatalogTests(unittest.TestCase):
             lambda realm: (ids, meta) if realm == "intl" else None)
         P._models_cache["intl"] = {"at": 0.0, "data": None}
         entries = dict(P.fetch_models("intl"))
-        self.assertIn("hy4-preview-f", entries)
-        self.assertEqual(entries["hy4-preview-f"]["credits"], "x0.00")
-        self.assertEqual(
-            P.model_entry("hy4-preview-f", entries["hy4-preview-f"])["credits"],
-            "x0.00")
+        self.assertNotIn("hy4-preview-f", entries)
 
     def test_parse_keeps_order_and_metadata(self):
         ids, meta = P.parse_remote_catalog(payload(INTL_IDS, INTL_META))
@@ -165,19 +165,17 @@ class RemoteCatalogTests(unittest.TestCase):
         P.fetch_remote_product_config = (
             lambda realm: (INTL_IDS, INTL_META) if realm == "intl" else None)
         ids = [m for m, _ in P.fetch_models("intl")]
-        self.assertEqual(ids, [
-            "hy4-preview-f", "hy3", "deepseek-v4.1-flash", "gpt-6-astra",
-            "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5",
-            "gpt-5.4", "grok-4.7", "gemini-3.5-flash", "glm-5.3-flash",
-            "glm-5.3", "glm-5.2", "kimi-k3", "kimi-k2.6", "kimi-k2.8-preview"])
+        curated = P.curate_remote_catalog("intl", INTL_IDS, INTL_META)
+        self.assertEqual(set(ids), set(curated))
+        self.assertEqual(ids[:3], ["hy3", "deepseek-v4.1-flash", "gpt-5.6-terra"])
+        self.assertEqual(len(ids), len(set(ids)))
 
     def test_cn_keeps_the_pinned_free_variant(self):
         P.fetch_remote_product_config = (
             lambda realm: (CN_IDS, CN_META) if realm == "cn" else None)
         ids = [m for m, _ in P.fetch_models("cn")]
-        self.assertEqual(ids[0], "hy4-preview-f")
-        self.assertIn("hy4-preview-f", ids)    # pin: free, remote no longer lists it
-        self.assertNotIn("hy4-preview", ids)   # paid sibling of the free one
+        self.assertNotIn("hy4-preview-f", ids)  # a removed free variant cannot hide a live paid one
+        self.assertIn("hy4-preview", ids)
         self.assertNotIn("hy3-x", ids)         # -x variant
         self.assertNotIn("auto", ids)          # auto-router alias
 
@@ -300,7 +298,7 @@ class RemoteCatalogTests(unittest.TestCase):
         P.product_config_path = lambda realm: path
         P._models_cache["cn"] = {"at": 0.0, "data": None}
         ids = [m for m, _ in P.fetch_models("cn")]
-        self.assertEqual(ids[0], "hy4-preview-f")
+        self.assertNotIn("hy4-preview-f", ids)
         self.assertNotIn("auto", ids)
         self.assertIn("new-model-9", ids)   # live-only name ships, no release
 

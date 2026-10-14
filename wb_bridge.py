@@ -23,7 +23,9 @@ def draining():
 
 
 def daily_enabled():
-    return os.environ.get("WB_INTERNATIONAL_DAILY_CHAT", "0") == "1"
+    # Official terms require a valid conversation in the actual client.
+    # Web/API automation is not an activity reward task, including old opt-ins.
+    return False
 
 
 def public_base():
@@ -353,9 +355,12 @@ def dispatch(handler, proxy):
         return True
     service = instance(proxy.POOL)
     if path == "/bridge/v1/accounts" and handler.command == "GET":
-        handler._json(200, {"accounts": [public_account(a) for a in proxy.POOL.accounts if a.bridge_ref]})
+        import wb_resin
+        handler._json(200, {"accounts": [{**public_account(a), "egress": wb_resin.public_route(a)}
+                                        for a in proxy.POOL.accounts if a.bridge_ref]})
         return True
-    if handler.command != "POST" or path not in {"/bridge/v1/login/start", "/bridge/v1/login/poll", "/bridge/v1/login/cancel"}:
+    if handler.command != "POST" or path not in {"/bridge/v1/login/start", "/bridge/v1/login/poll",
+                                                "/bridge/v1/login/cancel", "/bridge/v1/routes/reconcile"}:
         handler._json(404, {"error": "bridge operation not found"})
         return True
     try:
@@ -367,7 +372,24 @@ def dispatch(handler, proxy):
             raise ValueError("bridge is unavailable")
         service.active += 1
         try:
-            if path.endswith("/start"):
+            if path.endswith("/routes/reconcile"):
+                import wb_resin
+                results = []
+                for account in proxy.POOL.accounts:
+                    if not account.bridge_ref or (payload.get("uid") and payload["uid"] != account.uid):
+                        continue
+                    try:
+                        with account._refresh_lock:
+                            if not wb_resin.enabled(account):
+                                raise ValueError("account lease recovery is not configured")
+                            wb_resin.proxy_for(account)
+                        results.append({**public_account(account), "ok": True,
+                                        "egress": wb_resin.public_route(account)})
+                    except Exception as error:
+                        results.append({"uid": account.uid, "ok": False, "errorKind": type(error).__name__,
+                                        "egress": wb_resin.public_route(account)})
+                result = {"accounts": results}
+            elif path.endswith("/start"):
                 result = service.start(payload)
             elif path.endswith("/cancel"):
                 result = service.cancel(str(payload.get("id", "")))

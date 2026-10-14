@@ -18,6 +18,7 @@ import wb_settings
 import wb_upstream_pool
 import wb_webagent
 import wb_bridge
+import wb_resin
 
 # ---------------------------------------------------------------------------
 # 网页版通道（issue #75 / #59 / #90）
@@ -32,9 +33,8 @@ import wb_bridge
 # 是 建会话 → 取 session → ACP over HTTP+SSE 的 initialize / session/load /
 # session/prompt（实现见 wb_webagent）。
 #
-# 每日活跃奖励认的是「跑完的 agent 会话」：桌面身分发 chat/completions 不计数
-# （issue #75、#59 实测），只建会话不接沙箱同样不计数（#90 实测）。因此国际版
-# 打卡在桌面端对话之外，再走一次这条网页通道，并且把它跑到 completed。
+# 以下保留旧网页协议实现用于历史兼容；官方活动条款要求真实客户端。
+# API / 网页不计入每日奖励，所有国际自动任务入口已停用。
 # ---------------------------------------------------------------------------
 WEB_ORIGIN = "https://www.workbuddy.ai"
 WEB_ORIGIN_CN = "https://www.workbuddy.cn"
@@ -140,9 +140,24 @@ def urlopen(req, timeout=30, proxy=""):
         raise RuntimeError("gateway is draining")
     if wb_bridge.strict_proxy(proxy):
         try:
-            return wb_upstream_pool.urlopen(req, timeout=timeout, proxy=proxy)
+            try:
+                response = wb_upstream_pool.urlopen(req, timeout=timeout, proxy=proxy)
+            except Exception as error:
+                if isinstance(proxy, wb_resin.ManagedProxy) and wb_resin.guard_rejected(error):
+                    # CONNECT was rejected before the origin saw any bytes.
+                    # Re-read the generation once; never loop or use direct.
+                    proxy = wb_resin.reacquire(proxy)
+                    response = wb_upstream_pool.urlopen(req, timeout=timeout, proxy=proxy)
+                else:
+                    raise
+            if isinstance(proxy, wb_resin.ManagedProxy):
+                return wb_resin.ManagedResponse(response, proxy, "/chat/completions" in req.full_url)
+            return response
         except wb_upstream_pool.PoolBypass:
             raise RuntimeError("protected proxy cannot use a direct or redirect fallback") from None
+        except Exception as error:
+            wb_resin.note_failure(proxy, error)
+            raise
     if wb_upstream_pool.enabled():
         try:
             return wb_upstream_pool.urlopen(req, timeout=timeout, proxy=proxy)
@@ -176,6 +191,11 @@ def http_json(url, data=None, method=None, headers=None, timeout=30,
                 return json.loads(resp.read().decode("utf-8"))
         except Exception as exc:
             last = exc
+            if (isinstance(proxy, wb_resin.ManagedProxy) and data is not None
+                    and wb_resin.transport_failure(exc) and not wb_resin.guard_rejected(exc)):
+                # In particular, a refresh-token POST may already have rotated
+                # the upstream credential. Do not replay an uncertain write.
+                break
             if attempt >= attempts or not _retryable(exc):
                 break
             if log:
@@ -658,6 +678,8 @@ class Account(object):
         if self.bridge_ref or self.source == "account-hub":
             if not self.bridge_ref:
                 raise ValueError("managed identity has no source reference; reconnect from Account Hub")
+            if wb_resin.enabled(self):
+                return wb_resin.proxy_for(self)
             return wb_bridge.guarded_proxy(self.bridge_route)
         return self._proxy
 
@@ -752,6 +774,7 @@ class Account(object):
             "proxySlot": self.proxy_slot,
             "proxy": self.bridge_route.get("proxy", {}).get("server", "") if self.bridge_ref else self.proxy,
             "loginSource": self.bridge_ref or None,
+            "egress": wb_resin.public_route(self) if self.bridge_ref else None,
             "expiresAt": exp,
             "expiresIn": _human_delta(exp - time.time()) if exp else None,
             "hasRefreshToken": bool(self.refresh_token),
@@ -1455,10 +1478,10 @@ class Account(object):
         return str((data or {}).get("status") or "")
 
     def daily_chat(self, web=None, trigger="unknown"):
-        """国际版每日活跃对话（官方每日活跃 30/50 积分）。
+        """已停用的国际版历史自动对话入口，不代表官方活跃奖励。
 
         两步：桌面端身分的轻量对话（一直以来的做法），以及网页通道的会话
-        （issue #75/#59/#90：算数的是「跑完的 agent 会话」）。web=None 时按
+        （历史实验，不能据此判断官方奖励资格）。web=None 时按
         settings.json 里的 daily_chat_web 决定，True/False 可显式指定。
 
         trigger 只用于活动历史的来源标注；整次尝试记一行，网页通道那一步的结果
@@ -1509,7 +1532,7 @@ class Account(object):
                 else:
                     result["msg"] = ("每日活跃对话成功完成（网页通道失败：%s）"
                                      % res.get("error"))
-            # 只有真正计入官方「每日活跃」的网页通道成功了才算今天做过：网页腿失败时
+            # 仅记录历史本机流程完成，不代表官方每日活跃资格：网页腿失败时
             # 若照写 lastDailyChat，当天后续巡检会直接跳过该账号，那天的 30/50 积分静默
             # 丢掉且不再重试（面板还显示成功）。web=False（没开网页通道）时维持原
             # 语义：桌面腿成功即算完成。
@@ -3173,12 +3196,22 @@ class AccountPool(object):
                 return account
         return None
 
-    def representative(self, realm=None):
+    def representatives(self, realm=None):
+        """Metadata callers try every eligible account, without changing chat affinity.
+
+        Metadata is unmetered: credit/token budgets must not hide a catalogue.
+        Disabled, expired and cooling credentials are never sent upstream.
+        """
         with self._lock:
             candidates = [a for a in self.accounts if not realm or a.realm == realm]
-            for account in candidates:
-                if account.access_token: return account
-            return candidates[0] if candidates else None
+        now = time.time()
+        return [a for a in candidates if a.enabled and a.access_token
+                and max(a.cooldown_until, a.breaker_until, a.degrade_until) <= now
+                and (not (a.expires_at or jwt_exp(a.access_token))
+                     or (a.expires_at or jwt_exp(a.access_token)) > now + 120)]
+
+    def representative(self, realm=None):
+        return next(iter(self.representatives(realm)), None)
 
     def start_login(self, realm="intl", platform="CLI"):
         cfg = get_realm_config(realm)
