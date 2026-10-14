@@ -1,6 +1,7 @@
 """Gateway leases: exact identity, guarded recovery, bounded failure and no replay."""
 import copy
 import base64
+import http.client
 import io
 import json
 import os
@@ -169,6 +170,25 @@ class ResinTests(unittest.TestCase):
         empty.read()
         self.assertEqual(R._states[self.acc.uid]["failures"], 1)
         self.assertEqual(len(self.calls), 1)
+
+    def test_unbounded_http_read_obeys_body_framing_and_never_waits_for_socket_eof(self):
+        proxy = self.acc.proxy
+        class Socket:
+            def __init__(self, wire): self.wire = wire
+            def makefile(self, *_): return io.BytesIO(self.wire)
+        wires = (
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOKnext-response",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nOK\r\n0\r\n\r\n",
+        )
+        for wire in wires:
+            with self.subTest(chunked=b"chunked" in wire):
+                response = http.client.HTTPResponse(Socket(wire))
+                response.begin()
+                managed = R.ManagedResponse(response, proxy)
+                self.assertEqual(managed.read(), b"OK")
+                self.assertTrue(response.isclosed())
+                self.assertTrue(managed.finished)
+        self.assertEqual(len(self.calls), 1, "reading a framed body must not rotate its route")
 
 
 if __name__ == "__main__": unittest.main()

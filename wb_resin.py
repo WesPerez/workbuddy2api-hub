@@ -44,7 +44,11 @@ class ManagedResponse:
 
     def _read(self, method, size):
         try:
-            chunk = getattr(self.response, method)(size)
+            reader = getattr(self.response, method)
+            # HTTPResponse.read() uses None for an unbounded *HTTP body*.
+            # Passing -1 instead reads to socket EOF on Content-Length replies,
+            # hanging on keep-alive and falsely reporting a healthy proxy bad.
+            chunk = reader() if size is None or size < 0 else reader(size)
         except Exception as error:
             if not self.finished:
                 self.finished = True
