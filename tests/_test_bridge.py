@@ -166,6 +166,7 @@ class BridgeTests(unittest.TestCase):
         acc = self.delegated()
         newer = route(ip="203.0.113.77")
         newer["key"] = "hub-9-github-2"
+        newer["proxy"]["username"] = "AppsGlobal.hub-9-github-2"
         newer["binding"]["leaseCreatedAt"] = "987654321"
         with patch.dict(os.environ, {"WB_RESIN_PLATFORM": "AppsGlobal"}), patch.object(wb_resin, "forget_route") as forgotten:
             result = self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": newer, "expectedRevision": "rev-1"})
