@@ -18,6 +18,7 @@ os.environ["WB_DATA_DIR"] = _TMP.name
 import wb_accounts as accounts
 import wb_bridge as bridge
 import wb_upstream_pool as upstream
+import wb_resin
 
 def route(ip="203.0.113.5"):
     return {"key": "ldc-9", "proxy": {"server": "http://127.0.0.1:10834", "username": "AppsGlobal.ldc-9", "password": "synthetic-proxy-secret"},
@@ -166,7 +167,7 @@ class BridgeTests(unittest.TestCase):
         newer = route(ip="203.0.113.77")
         newer["key"] = "hub-9-github-2"
         newer["binding"]["leaseCreatedAt"] = "987654321"
-        with patch.dict(os.environ, {"WB_RESIN_PLATFORM": "AppsGlobal"}), patch.object(bridge.wb_resin, "forget_route") as forgotten:
+        with patch.dict(os.environ, {"WB_RESIN_PLATFORM": "AppsGlobal"}), patch.object(wb_resin, "forget_route") as forgotten:
             result = self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": newer, "expectedRevision": "rev-1"})
         self.assertTrue(result["changed"])
         self.assertEqual(result["routeKey"], "hub-9-github-2")
@@ -180,7 +181,7 @@ class BridgeTests(unittest.TestCase):
 
     def test_login_route_refresh_is_idempotent_for_the_same_generation(self):
         self.delegated()
-        with patch.dict(os.environ, {"WB_RESIN_PLATFORM": "AppsGlobal"}), patch.object(bridge.wb_resin, "forget_route"):
+        with patch.dict(os.environ, {"WB_RESIN_PLATFORM": "AppsGlobal"}), patch.object(wb_resin, "forget_route"):
             result = self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": route(), "expectedRevision": "rev-1"})
         self.assertFalse(result["changed"])
         self.assertEqual(result["revision"], "rev-1")
@@ -190,7 +191,7 @@ class BridgeTests(unittest.TestCase):
         self.delegated()
         with self.assertRaises(ValueError):
             self.bridge.update_route({"accountRef": "account-hub:instance:404", "route": route()})
-        with patch.dict(os.environ, {"WB_RESIN_PLATFORM": "AppsGlobal"}), patch.object(bridge.wb_resin, "forget_route") as forgotten:
+        with patch.dict(os.environ, {"WB_RESIN_PLATFORM": "AppsGlobal"}), patch.object(wb_resin, "forget_route") as forgotten:
             with self.assertRaises(ValueError):
                 self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": route(ip="203.0.113.88"), "expectedRevision": "rev-stale"})
             forgotten.assert_not_called()
