@@ -230,6 +230,24 @@ def proxy_for(account):
     return _acquire(account.uid, source_route(account))
 
 
+def forget_route(account):
+    """Force the next proxy_for(account) to re-acquire from the new source route.
+
+    Called after a delegated bridgeRoute refresh. Without this the cached
+    "available" state for the OLD generation would be reused for up to
+    CACHE_SECONDS, so a caller could still be handed the retired lease.
+    Receipt state is published with a non-available status, which makes the
+    next _acquire bypass the cache and ask Resin for a current generation.
+    """
+    if not enabled(account):
+        return None
+    now = time.time()
+    with account_lock(account.uid):
+        state = _states.get(account.uid, {})
+        _publish(account.uid, {**state, "status": "route_updated", "checkedAt": 0, "retryAt": 0})
+        return {"uid": account.uid, "status": "route_updated", "at": now}
+
+
 def guard_rejected(error):
     # Only CONNECT 409 proves the origin has not received the request. An
     # upstream HTTP 409 is a business response and must never rotate/replay it.

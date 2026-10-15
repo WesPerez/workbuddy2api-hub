@@ -216,6 +216,55 @@ class Bridge:
             self.persist(row)
             return self.view(row)
 
+    def update_route(self, value):
+        """Replace a delegated account's login-route snapshot from Account Hub.
+
+        The login route (key ldc-*/hub-*-github-*) is chosen by Account Hub and
+        was previously written only once, inside login/start. When Hub later
+        rotates the account egress, the snapshot went stale and Resin answered
+        CONNECT 409 forever. This endpoint lets Hub push the current route; it
+        never touches tokens and never creates an account.
+        """
+        import wb_resin
+        ref = str(value.get("accountRef") or "")
+        route = value.get("route")
+        expected = value.get("expectedRevision")
+        if not re.fullmatch(r"[A-Za-z0-9:_-]{1,120}", ref):
+            raise ValueError("invalid account reference")
+        with self.lock:
+            account = next((row for row in self.pool.accounts if row.bridge_ref == ref), None)
+            if account is None:
+                raise ValueError("no such delegated account")
+            if expected is not None and expected != account.bridge_revision:
+                # A concurrent login or refresh already changed this binding.
+                raise ValueError("delegated revision changed")
+            validate_route(route, allow_ipv6=True)
+            previous = account.bridge_route or {}
+            previous_binding = previous.get("binding") or {}
+            incoming = route.get("binding") or {}
+            if (previous.get("key") == route.get("key")
+                    and previous_binding.get("nodeHash") == incoming.get("nodeHash")
+                    and previous_binding.get("leaseCreatedAt") == incoming.get("leaseCreatedAt")
+                    and previous_binding.get("ip") == incoming.get("ip")):
+                # Idempotent: same generation, nothing to persist.
+                return {"accountRef": ref, "changed": False, "revision": account.bridge_revision,
+                        "uid": account.uid, "routeKey": previous.get("key")}
+            before = {"bridge_route": account.bridge_route, "bridge_revision": account.bridge_revision}
+            try:
+                account.bridge_route = route
+                account.bridge_revision = str(uuid.uuid4())
+                account.save(self.pool.dir)
+            except BaseException:
+                for field, old in before.items():
+                    setattr(account, field, old)
+                raise
+            # The API lease is derived from the login route; drop the cached
+            # generation so the next chat call re-acquires from the new one.
+            wb_resin.forget_route(account)
+            return {"accountRef": ref, "changed": True, "revision": account.bridge_revision,
+                    "uid": account.uid, "routeKey": route.get("key"),
+                    "previousRouteKey": previous.get("key")}
+
     def poll(self, task_id):
         import wb_accounts as accounts
         with self.lock:
@@ -365,7 +414,8 @@ def dispatch(handler, proxy):
                                         for a in proxy.POOL.accounts if a.bridge_ref]})
         return True
     if handler.command != "POST" or path not in {"/bridge/v1/login/start", "/bridge/v1/login/poll",
-                                                "/bridge/v1/login/cancel", "/bridge/v1/routes/reconcile"}:
+                                                "/bridge/v1/login/cancel", "/bridge/v1/routes/reconcile",
+                                                "/bridge/v1/routes/update"}:
         handler._json(404, {"error": "bridge operation not found"})
         return True
     try:
@@ -394,6 +444,8 @@ def dispatch(handler, proxy):
                         results.append({"uid": account.uid, "ok": False, "errorKind": type(error).__name__,
                                         "egress": wb_resin.public_route(account)})
                 result = {"accounts": results}
+            elif path.endswith("/routes/update"):
+                result = service.update_route(payload)
             elif path.endswith("/start"):
                 result = service.start(payload)
             elif path.endswith("/cancel"):
