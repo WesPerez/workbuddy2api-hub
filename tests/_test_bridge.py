@@ -278,4 +278,60 @@ class BridgeTests(unittest.TestCase):
                 wb_resin.proxy_for(acc)
                 self.assertTrue(control.called)
 
+    def test_route_update_requires_a_real_route_revision_instead_of_unconditional_write(self):
+        # Hub's pre-migration metadata has no routeRevision. Passing None must not
+        # become an unconditional write: the caller has to read the binding and
+        # retry with what it observed.
+        acc = self.delegated()
+        newer = route(ip="203.0.113.123")
+        newer["key"] = "hub-9-github-9"
+        newer["proxy"]["username"] = "AppsGlobal.hub-9-github-9"
+        with self.assertRaises(ValueError):
+            self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": newer,
+                                      "expectedRouteRevision": None})
+        self.assertEqual(acc.bridge_route["key"], "ldc-9")
+        with self.assertRaises(ValueError):
+            self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": newer})
+        self.assertEqual(acc.bridge_route["key"], "ldc-9")
+    def test_a_login_that_changes_the_route_advances_the_route_revision(self):
+        acc = self.delegated(route_revision="rr-1", revision="rev-1")
+        # A login delivering a DIFFERENT route must move routeRevision, otherwise
+        # Hub's CAS can never observe the change.
+        with patch("wb_bridge.guarded_proxy", side_effect=lambda r: "/dev/null"), \
+                patch.object(accounts, "http_json", side_effect=[
+                    {"data": {"state": "s", "authUrl": "https://www.workbuddy.ai/login?state=s"}},  # start
+                    {"code": 0, "data": {"accessToken": token(), "refreshToken": "r", "expiresAt": 1}},  # poll
+                ]), \
+                patch.object(accounts, "fetch_account_profile", return_value=("official-uid", "N")):
+            moved = route(ip="203.0.113.200")
+            moved["key"] = "hub-9-github-7"
+            moved["proxy"]["username"] = "AppsGlobal.hub-9-github-7"
+            started = self.bridge.start({"accountRef": "account-hub:instance:9",
+                                         "idempotencyKey": "synthetic-login-route-move",
+                                         "githubLogin": "WesPerez", "route": moved,
+                                         "expectedUid": "official-uid"})
+            self.bridge.poll(started["id"])
+        self.assertNotEqual(acc.route_revision, "rr-1", "the route generation must advance with the route")
+        self.assertEqual(acc.bridge_route["key"], "hub-9-github-7")
+    def test_a_route_update_during_a_login_is_detected_by_the_frozen_expectation(self):
+        acc = self.delegated(route_revision="rr-1", revision="rev-1")
+        responses = [
+            {"data": {"state": "s", "authUrl": "https://www.workbuddy.ai/login?state=s"}},
+            {"code": 0, "data": {"accessToken": token(), "refreshToken": "r", "expiresAt": 1}},
+        ]
+        def http_json(*args, **kwargs):
+            return responses.pop(0)
+        with patch("wb_bridge.guarded_proxy", side_effect=lambda r: "/dev/null"), \
+                patch.object(accounts, "http_json", side_effect=http_json), \
+                patch.object(accounts, "fetch_account_profile", return_value=("official-uid", "N")):
+            started = self.bridge.start({"accountRef": "account-hub:instance:9",
+                                         "idempotencyKey": "synthetic-login-frozen",
+                                         "githubLogin": "WesPerez", "route": route(),
+                                         "expectedUid": "official-uid"})
+            # Another writer moves the route generation while the login is pending.
+            acc.route_revision = "rr-moved"
+            with self.assertRaises(ValueError):
+                self.bridge.poll(started["id"])
+        self.assertEqual(acc.route_revision, "rr-moved", "the concurrent route writer wins")
+
 if __name__ == "__main__": unittest.main()

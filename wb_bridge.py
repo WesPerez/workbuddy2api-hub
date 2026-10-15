@@ -155,6 +155,9 @@ class Bridge:
             task_id = str(uuid.uuid4())
             data = {"route": route, "expectedUid": value.get("expectedUid"),
                     "expectedRevision": existing.bridge_revision if existing else None,
+                    # Freeze the route generation too, so a route update landing
+                    # mid-login is detected instead of silently overwritten.
+                    "expectedRouteRevision": existing.route_revision if existing else None,
                     "githubLogin": github_login}
             row = {"id": task_id, "state": "starting", "payload": json.dumps(data),
                    "account_ref": ref, "result": None}
@@ -262,7 +265,11 @@ class Bridge:
         """
         ref = str(value.get("accountRef") or "")
         route = value.get("route")
-        expected = value.get("expectedRouteRevision", value.get("expectedRevision"))
+        # Deliberately NO fallback to expectedRevision: that field is the TOKEN
+        # generation, which a normal refresh rotates. Accepting it here would let
+        # a caller bypass route CAS entirely by passing a value that happens to
+        # match. A route update must carry the route generation and nothing else.
+        expected = value.get("expectedRouteRevision")
         expected_uid = value.get("uid")
         if not re.fullmatch(r"[A-Za-z0-9:_-]{1,120}", ref):
             raise ValueError("invalid account reference")
@@ -291,7 +298,13 @@ class Bridge:
             # Idempotent even if the caller's revision is stale: the route is
             # already exactly what it asked for.
             return {"accountRef": ref, "changed": False, "committed": True, **self.route_view(account)}
-        if expected is not None and expected != account.route_revision:
+        # No unconditional writes. A caller that does not know the current route
+        # revision (Hub's pre-migration metadata has none) must read the binding
+        # first and retry with the value it observed; otherwise two writers that
+        # both pass None would silently clobber each other.
+        if not isinstance(expected, str) or not expected:
+            raise ValueError("route revision required; read the route first")
+        if expected != account.route_revision:
             raise ValueError("route revision changed")
         before = {"bridge_route": account.bridge_route, "route_revision": account.route_revision}
         try:
@@ -372,12 +385,41 @@ class Bridge:
                     with existing._refresh_lock:
                         if existing.bridge_revision != data.get("expectedRevision"):
                             raise ValueError("WorkBuddy credential generation changed during login")
+                        # A login can carry a NEW route. Any OTHER writer that moved
+                        # the route revision while this login was in flight wins,
+                        # so the frozen expectation must still hold. A login that
+                        # does change the route then advances the revision below,
+                        # which is what lets Hub observe the change through CAS.
+                        frozen = data.get("expectedRouteRevision")
+                        if frozen is not None and existing.route_revision != frozen:
+                            raise ValueError("route revision changed during login")
                         fields = ["access_token", "refresh_token", "expires_at", "domain", "nickname",
                                   "bridge_route", "bridge_task", "bridge_revision"]
                         before = {field: getattr(existing, field) for field in fields}
+                        # route_revision is part of the pre-image too: a failed
+                        # save must roll IT back as well, or the next Hub CAS
+                        # would be rejected against a revision nothing persisted.
+                        before["route_revision"] = existing.route_revision
                         try:
                             for field in fields:
                                 setattr(existing, field, getattr(candidate, field))
+                            # Every route writer advances the same route revision.
+                            previous_route = before.get("bridge_route") or {}
+                            next_route = candidate.bridge_route or {}
+                            previous_binding = previous_route.get("binding") or {}
+                            next_binding = next_route.get("binding") or {}
+                            # The route generation is the whole tuple. An IP-only
+                            # change is still a route change (the resume/refresh
+                            # path may rotate the exit), so compare every field
+                            # the guard actually consumes.
+                            route_changed = any(
+                                previous_route.get(field) != next_route.get(field) for field in ("key", "proxy")
+                            ) or any(
+                                previous_binding.get(field) != next_binding.get(field)
+                                for field in ("platform", "nodeHash", "ip", "leaseCreatedAt", "leaseGuardVersion")
+                            )
+                            if route_changed:
+                                existing.route_revision = str(uuid.uuid4())
                             existing.save(self.pool.dir)
                         except BaseException:
                             for field, old in before.items():
