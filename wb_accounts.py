@@ -548,6 +548,12 @@ class Account(object):
         self.source = str(data.get("source") or "oauth")
         self.bridge_ref = str(data.get("bridgeRef") or "")
         self.bridge_revision = str(data.get("bridgeRevision") or "")
+        # Route CAS is deliberately separate from bridge_revision. A normal
+        # token refresh rotates bridge_revision (see _refresh_locked), so using
+        # it as the route compare-and-swap key would reject every Hub route
+        # update forever after the first refresh. route_revision only moves when
+        # the delegated login route itself changes.
+        self.route_revision = str(data.get("routeRevision") or self.bridge_revision or "")
         self.bridge_task = str(data.get("bridgeTask") or "")
         self.bridge_route = data.get("bridgeRoute") or {}
         self.proxy_slot = str(data.get("proxySlot") or "").strip()
@@ -741,6 +747,7 @@ class Account(object):
             "source": self.source,
             "bridgeRef": self.bridge_ref,
             "bridgeRevision": self.bridge_revision,
+            "routeRevision": self.route_revision,
             "bridgeTask": self.bridge_task,
             "bridgeRoute": self.bridge_route,
             "proxySlot": self.proxy_slot,

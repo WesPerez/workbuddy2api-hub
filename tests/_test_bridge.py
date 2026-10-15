@@ -154,10 +154,11 @@ class BridgeTests(unittest.TestCase):
                 self.assertFalse(acc.daily_chat_web()["ok"]); network.assert_not_called()
 
 
-    def delegated(self, ref="account-hub:instance:9", rt=None, revision="rev-1"):
+    def delegated(self, ref="account-hub:instance:9", rt=None, revision="rev-1", route_revision="rr-1"):
         acc = accounts.Account({"uid": "official-uid", "realm": "intl", "accessToken": token(),
                                 "refreshToken": "synthetic-refresh", "source": "account-hub",
-                                "bridgeRef": ref, "bridgeRoute": rt or route(), "bridgeRevision": revision})
+                                "bridgeRef": ref, "bridgeRoute": rt or route(), "bridgeRevision": revision,
+                                "routeRevision": route_revision})
         acc.save(self.pool.dir)
         self.pool.accounts.append(acc)
         return acc
@@ -169,36 +170,58 @@ class BridgeTests(unittest.TestCase):
         newer["proxy"]["username"] = "AppsGlobal.hub-9-github-2"
         newer["binding"]["leaseCreatedAt"] = "987654321"
         with patch.dict(os.environ, {"WB_RESIN_PLATFORM": "AppsGlobal"}), patch.object(wb_resin, "forget_route") as forgotten:
-            result = self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": newer, "expectedRevision": "rev-1"})
+            result = self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": newer,
+                                               "expectedRouteRevision": "rr-1", "uid": "official-uid"})
         self.assertTrue(result["changed"])
-        self.assertEqual(result["routeKey"], "hub-9-github-2")
-        self.assertEqual(result["previousRouteKey"], "ldc-9")
-        self.assertNotEqual(result["revision"], "rev-1")
+        self.assertTrue(result["committed"])
+        self.assertEqual(result["key"], "hub-9-github-2")
+        self.assertEqual(result["previousKey"], "ldc-9")
+        self.assertNotEqual(result["routeRevision"], "rr-1")
+        # bridgeRevision is the token-refresh generation and must NOT move here.
+        self.assertEqual(result["revision"], "rev-1")
         saved = json.loads(Path(acc.path).read_text())
         self.assertEqual(saved["bridgeRoute"]["key"], "hub-9-github-2")
         self.assertEqual(saved["bridgeRoute"]["binding"]["leaseCreatedAt"], "987654321")
-        self.assertEqual(saved["bridgeRevision"], result["revision"])
+        self.assertEqual(saved["routeRevision"], result["routeRevision"])
         forgotten.assert_called_once()
 
-    def test_login_route_refresh_is_idempotent_for_the_same_generation(self):
+    def test_route_revision_survives_a_token_refresh_that_rotates_bridge_revision(self):
+        acc = self.delegated(route_revision="rr-1", revision="rev-1")
+        # A normal refresh rotates bridgeRevision only.
+        acc.bridge_revision = "rev-2"
+        newer = route(ip="203.0.113.5")
+        newer["key"] = "hub-9-github-3"
+        newer["proxy"]["username"] = "AppsGlobal.hub-9-github-3"
+        with patch.dict(os.environ, {"WB_RESIN_PLATFORM": "AppsGlobal"}), patch.object(wb_resin, "forget_route"):
+            result = self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": newer,
+                                               "expectedRouteRevision": "rr-1"})
+        self.assertTrue(result["changed"], "a token refresh must not block a route update")
+        self.assertEqual(result["revision"], "rev-2", "the route write keeps the refreshed token revision")
+
+    def test_login_route_refresh_is_idempotent_even_with_a_stale_revision(self):
         self.delegated()
         with patch.dict(os.environ, {"WB_RESIN_PLATFORM": "AppsGlobal"}), patch.object(wb_resin, "forget_route"):
-            result = self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": route(), "expectedRevision": "rev-1"})
+            result = self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": route(),
+                                               "expectedRouteRevision": "rr-stale"})
         self.assertFalse(result["changed"])
-        self.assertEqual(result["revision"], "rev-1")
-        self.assertEqual(result["routeKey"], "ldc-9")
+        self.assertTrue(result["committed"])
+        self.assertEqual(result["routeRevision"], "rr-1")
 
-    def test_login_route_refresh_refuses_unknown_account_and_stale_revision(self):
+    def test_login_route_refresh_refuses_unknown_account_stale_revision_and_identity_mismatch(self):
         self.delegated()
         with self.assertRaises(ValueError):
             self.bridge.update_route({"accountRef": "account-hub:instance:404", "route": route()})
+        with self.assertRaises(ValueError):
+            self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": route(),
+                                      "uid": "a-different-uid"})
         with patch.dict(os.environ, {"WB_RESIN_PLATFORM": "AppsGlobal"}), patch.object(wb_resin, "forget_route") as forgotten:
             with self.assertRaises(ValueError):
-                self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": route(ip="203.0.113.88"), "expectedRevision": "rev-stale"})
+                self.bridge.update_route({"accountRef": "account-hub:instance:9",
+                                          "route": route(ip="203.0.113.88"), "expectedRouteRevision": "rr-stale"})
             forgotten.assert_not_called()
         acc = self.pool.accounts[0]
         self.assertEqual(acc.bridge_route["key"], "ldc-9")
-        self.assertEqual(acc.bridge_revision, "rev-1")
+        self.assertEqual(acc.route_revision, "rr-1")
 
     def test_login_route_refresh_refuses_an_unusable_route_and_rolls_back_on_save_failure(self):
         acc = self.delegated()
@@ -212,10 +235,33 @@ class BridgeTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": newer})
         self.assertEqual(acc.bridge_route["key"], "ldc-9")
-        self.assertEqual(acc.bridge_revision, "rev-1")
+        self.assertEqual(acc.route_revision, "rr-1")
+
+    def test_a_cache_invalidation_failure_is_reported_as_committed_with_a_warning(self):
+        self.delegated()
+        newer = route(ip="203.0.113.111")
+        newer["key"] = "hub-9-github-4"
+        newer["proxy"]["username"] = "AppsGlobal.hub-9-github-4"
+        with patch.dict(os.environ, {"WB_RESIN_PLATFORM": "AppsGlobal"}),                 patch.object(wb_resin, "forget_route", side_effect=OSError("receipt write failed")):
+            result = self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": newer,
+                                               "expectedRouteRevision": "rr-1"})
+        self.assertTrue(result["changed"])
+        self.assertTrue(result["committed"], "a committed write must be reported even when cache invalidation failed")
+        self.assertEqual(result["warnings"][0]["step"], "forget_route")
+        self.assertEqual(self.pool.accounts[0].bridge_route["key"], "hub-9-github-4")
+
+    def test_read_routes_reports_the_committed_state_without_secrets(self):
+        self.delegated()
+        result = self.bridge.read_routes({"accountRef": "account-hub:instance:9"})
+        row = result["accounts"][0]
+        self.assertEqual(row["uid"], "official-uid")
+        self.assertEqual(row["key"], "ldc-9")
+        self.assertEqual(row["routeRevision"], "rr-1")
+        serialized = json.dumps(result)
+        self.assertNotIn("synthetic-proxy-secret", serialized)
+        self.assertNotIn(token(), serialized)
 
     def test_forget_route_drops_the_cached_generation(self):
-        import wb_resin
         acc = self.delegated()
         with patch.dict(os.environ, {"WB_RESIN_PLATFORM": "AppsGlobal"}):
             with patch.object(wb_resin, "_control") as control:
