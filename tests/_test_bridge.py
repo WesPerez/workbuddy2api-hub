@@ -233,7 +233,8 @@ class BridgeTests(unittest.TestCase):
         newer["binding"]["leaseCreatedAt"] = "555555555"
         with patch.dict(os.environ, {"WB_RESIN_PLATFORM": "AppsGlobal"}), patch.object(accounts.Account, "save", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
-                self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": newer})
+                self.bridge.update_route({"accountRef": "account-hub:instance:9", "route": newer,
+                                          "expectedRouteRevision": "rr-1"})
         self.assertEqual(acc.bridge_route["key"], "ldc-9")
         self.assertEqual(acc.route_revision, "rr-1")
 
