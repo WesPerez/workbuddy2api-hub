@@ -1,3 +1,4 @@
+import wb_bridge
 # -*- coding: utf-8 -*-
 """上游连接复用池：按 (scheme, host, port, 代理串) 复用 http.client 的 keep-alive 连接。
 
@@ -627,8 +628,8 @@ def _fold_bypassed(host, proxy_raw):
     """
     proxy_info = _split_proxy(proxy_raw)
     if proxy_raw and proxy_info is None:
-        raise PoolBypass("proxy %r is not an http proxy" % (proxy_raw,))
-    if proxy_info and _proxy_bypassed(host):
+        raise PoolBypass("configured proxy is not an HTTP proxy")
+    if proxy_info and not wb_bridge.strict_proxy(proxy_raw) and _proxy_bypassed(host):
         return None, ""
     return proxy_info, proxy_raw
 

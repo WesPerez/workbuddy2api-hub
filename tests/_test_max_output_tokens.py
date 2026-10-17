@@ -64,7 +64,7 @@ class MaxOutputTokensTests(unittest.TestCase):
         self.assertEqual(
             P.model_default_max_output_tokens("deepseek-v4.1-flash"), 128000
         )
-        self.assertEqual(P.model_default_max_output_tokens("gpt-6-astra"), 128000)
+        self.assertEqual(P.model_default_max_output_tokens("gpt-6-sol"), 128000)
         self.assertIsNone(P.model_default_max_output_tokens("non-existent-model"))
 
 
