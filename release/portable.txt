@@ -23,6 +23,7 @@
 LICENSE
 README.md
 dashboard.html
+console_tail.py
 
 start-wb-proxy.bat
 start-wb-proxy.command
@@ -55,10 +56,15 @@ wb_pricing.py
 wb_probes.py
 wb_prompt.py
 wb_proxy.py
+wb_resin.py
 wb_scheduler.py
 wb_settings.py
+wb_sources.py
 wb_tasks.py
 wb_updates.py
 wb_upstream_pool.py
 wb_webagent.py
 wb_webtools.py
+
+wb_bridge.py
+favicon.svg
