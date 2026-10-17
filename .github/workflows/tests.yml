@@ -11,6 +11,7 @@ on:
     # below, so a release cannot ship a tag that disagrees with the code.
     tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 
 # A second push to the same branch makes the first run pointless: cancel it
 # instead of paying for two full matrices.
