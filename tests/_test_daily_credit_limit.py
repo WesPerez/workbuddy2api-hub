@@ -297,7 +297,7 @@ class FreeModelViewTests(unittest.TestCase):
         # there - the same id, two answers.
         self.assertIn("deepseek-v4.1-flash", view["intl"])
         self.assertNotIn("deepseek-v4.1-flash", view["cn"])
-        self.assertIn("hy4-preview-f", view["intl"])
+        self.assertIn("step-5-preview", view["intl"])
         self.assertIn("hy4-preview-f", view["cn"])
         # A paid id is in neither table.
         self.assertNotIn("gpt-6-astra", view["intl"])

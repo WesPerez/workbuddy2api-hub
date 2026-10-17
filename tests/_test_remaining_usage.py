@@ -230,6 +230,8 @@ def find_row(data, uid, model=MODEL):
 
 class RemainingUsageTests(unittest.TestCase):
     def setUp(self):
+        # Append-only cases must not inherit a previous case's limit events.
+        write_log([])
         clear_events()
         clear_daily()
         clear_log()

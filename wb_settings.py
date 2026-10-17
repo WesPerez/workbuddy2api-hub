@@ -16,6 +16,7 @@ import re
 import secrets
 import threading
 import time
+import wb_sources
 
 DEFAULT_PANEL_PASSWORD = "admin"
 PBKDF2_ROUNDS = 120_000
@@ -1098,6 +1099,7 @@ UPSTREAM_DEFAULTS = {
     "idle_timeout_seconds": 300,
     "device_token": "",
     "device_token_file": "",
+    "capabilities": {},
 }
 
 
@@ -1111,6 +1113,8 @@ def validate_upstream_patch(raw):
             if value < 1:
                 raise ValueError("%s cannot be less than 1" % key)
             out[key] = value
+        elif key == "capabilities":
+            out[key] = wb_sources.validate_capabilities(value)
         elif key in ("device_token", "device_token_file"):
             if not isinstance(value, str):
                 raise ValueError("%s must be a string" % key)
@@ -1130,6 +1134,8 @@ def upstream_config(accounts_dir):
         if key in ("header_timeout_seconds", "idle_timeout_seconds"):
             out[key] = (value if isinstance(value, int) and not isinstance(value, bool)
                         and value >= 1 else default)
+        elif key == "capabilities":
+            out[key] = value
         else:
             out[key] = value.strip() if isinstance(value, str) else default
     return out
@@ -1137,11 +1143,10 @@ def upstream_config(accounts_dir):
 
 def set_upstream_config(accounts_dir, cfg):
     """Persist the upstream settings. Returns the stored config."""
-    current = upstream_config(accounts_dir)
-    if isinstance(cfg, dict):
-        current.update({k: v for k, v in cfg.items() if k in UPSTREAM_DEFAULTS})
-    clean = validate_upstream_patch(current)
     with _lock:
+        current = deep_merge(upstream_config(accounts_dir), validate_upstream_patch(cfg))
+        clean = validate_upstream_patch(current)
+        clean['capabilities'] = wb_sources.validate_capabilities(clean['capabilities'], complete=True)
         data = load(accounts_dir)
         data["upstream"] = deep_merge(data.get("upstream"), clean)
         save(accounts_dir, data)

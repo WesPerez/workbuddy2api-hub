@@ -182,22 +182,22 @@ check("a pinned model ignores a level the request carries anyway",
 
 # A selectable model with no client value runs at its declared default, and the
 # client's own value wins when it sends one.
-check("gpt-6-astra declares a default", P.model_default_effort("gpt-6-astra") == "high",
-      P.model_default_effort("gpt-6-astra"))
+check("gpt-6-sol declares a default", P.model_default_effort("gpt-6-sol") == "high",
+      P.model_default_effort("gpt-6-sol"))
 check("a selectable model falls back to that default",
-      open_with(chat("gpt-6-astra")) == "high", open_with(chat("gpt-6-astra")))
+      open_with(chat("gpt-6-sol")) == "high", open_with(chat("gpt-6-sol")))
 check("the client's own value still wins",
-      open_with(chat("gpt-6-astra", reasoning_effort="low")) == "low",
-      open_with(chat("gpt-6-astra", reasoning_effort="low")))
+      open_with(chat("gpt-6-sol", reasoning_effort="low")) == "low",
+      open_with(chat("gpt-6-sol", reasoning_effort="low")))
 
 # Switching thinking off is an answer, not a gap: it must not be filled in with
 # the model's default.
 check("a request that disables thinking reports none",
-      open_with(chat("gpt-6-astra", thinking={"type": "disabled"})) == "none",
-      open_with(chat("gpt-6-astra", thinking={"type": "disabled"})))
+      open_with(chat("gpt-6-sol", thinking={"type": "disabled"})) == "none",
+      open_with(chat("gpt-6-sol", thinking={"type": "disabled"})))
 check("an explicit none reports none",
-      open_with(chat("gpt-6-astra", reasoning_effort="none")) == "none",
-      open_with(chat("gpt-6-astra", reasoning_effort="none")))
+      open_with(chat("gpt-6-sol", reasoning_effort="none")) == "none",
+      open_with(chat("gpt-6-sol", reasoning_effort="none")))
 check("a model with no reasoning metadata stays unknown",
       P.upstream_effort_of(chat("hy3"), "hy3") in (None, "low", "high"),
       P.upstream_effort_of(chat("hy3"), "hy3"))
