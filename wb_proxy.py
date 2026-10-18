@@ -16517,7 +16517,7 @@ class Handler(BaseHTTPRequestHandler):
                 req_path = (getattr(self, "path", None) or (args[0] if args else "")).split("?")[0]
                 quiet_prefixes = (
                     "/logs", "/usage", "/accounts", "/scheduler",
-                    "/health", "/panel/status", "/realm", "/favicon.ico"
+                    "/health", "/healthz", "/panel/status", "/realm", "/favicon.ico"
                 )
                 if any(req_path == p or req_path.startswith(p + "/") for p in quiet_prefixes):
                     return
