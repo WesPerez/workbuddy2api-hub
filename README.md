@@ -135,7 +135,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 158 个套件：116 个 Python + 42 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 159 个套件：117 个 Python + 42 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -415,6 +415,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 ### Unreleased
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.12，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
+
+- **修复：健康探测不再刷访问日志**。`/healthz` 与更新器每两分钟轮询一次的部署探针是同一入口，此前不在访问日志的静默前缀里，每次探测都要在发送响应前同步写一行日志，看板「日志」页也被无信息量的 200 占满。现将其纳入与 `/health` 相同的静默集合；非 2xx/3xx 与非 GET 请求仍如实记录，排障信息不丢。（`tests/_test_health_probe_logging.py` 钉住这组行为）
 
 ## 七、致谢与引用声明 (Credits & References)
 
