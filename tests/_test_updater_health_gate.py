@@ -152,17 +152,45 @@ class HealthProbeTests(unittest.TestCase):
             result = hp.worker_probe('http://fixture', COMMIT, False, 4)
         self.assertEqual(result, {'reason': 'transport_failure', 'retryable': True})
 
-    def test_delayed_headers_and_reads_are_classified_and_bounded(self):
-        for row, reason in [({'header_delay': 1.2}, 'connection_timeout'),
-                            ({'body_delay': 1.2}, 'read_timeout'),
-                            ({'trickle': .06}, 'read_timeout')]:
-            with self.subTest(reason=reason, row=row):
+    def test_worker_classifies_observed_header_and_read_timeouts(self):
+        # Test the actual HTTP reader phase, independently of child-process
+        # creation/scheduling. A short parent's deadline does not prove that
+        # Windows has scheduled the reader through receipt of the headers.
+        # Inject the timeout at the actual opener/read boundary so even the
+        # server thread need not meet a real-time scheduling promise. The
+        # separate loopback deadline test still exercises delayed real HTTP.
+        for phase, reason in [('connect', 'connection_timeout'), ('read', 'read_timeout')]:
+            opener = mock.Mock()
+            if phase == 'connect':
+                opener.open.side_effect = hp.urllib.error.URLError(socket.timeout())
+            else:
+                response = mock.MagicMock()
+                response.status = 200
+                response.read.side_effect = socket.timeout()
+                response.__enter__.return_value = response
+                opener.open.return_value = response
+            with self.subTest(reason=reason), \
+                 mock.patch.object(hp.urllib.request, 'build_opener', return_value=opener), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                result = hp.worker_probe('http://fixture', COMMIT, False, .8)
+                self.assertEqual(result['reason'], reason)
+                self.assertTrue(result['retryable'])
+                opener.open.assert_called_once()
+                if phase == 'read':
+                    response.read.assert_called_once_with(hp.MAX_RESPONSE + 1)
+
+    def test_delayed_headers_and_reads_obey_total_deadline(self):
+        for row in ({'header_delay': 1.2}, {'body_delay': 1.2}, {'trickle': .06}):
+            with self.subTest(row=row):
                 start = time.monotonic()
                 with server([row]) as (url, calls):
                     result = hp.probe_health(url, COMMIT, total_timeout=.8)
                     elapsed = time.monotonic() - start
                     self.assertFalse(result)
-                    self.assertEqual(result.reason, reason)
+                    # Exact read-phase classification is asserted above and
+                    # in the reader kill/reap fixture. Here either observed
+                    # phase may exhaust the same total budget; never success.
+                    self.assertIn(result.reason, ('connection_timeout', 'read_timeout'))
                     self.assertEqual(result.attempts, 1)
                     # Small process creation/reaping/scheduler overhead is not
                     # treated as permission for another full timeout budget.
