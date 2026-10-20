@@ -25,6 +25,7 @@ REASONS = frozenset({'ok', 'connection_timeout', 'read_timeout', 'transport_fail
                      'ok_false', 'commit_mismatch', 'busy', 'deadline_exhausted', 'probe_error'})
 TRANSIENT_ERRNOS = frozenset({errno.ECONNREFUSED, errno.ECONNRESET, errno.ECONNABORTED,
                             errno.EPIPE, errno.ETIMEDOUT})
+TRANSIENT_WINERRORS = frozenset({10053, 10054, 10060, 10061})
 
 
 def safe_commit(value):
@@ -87,7 +88,8 @@ def transient(error):
         return True
     if isinstance(error, socket.gaierror):
         return error.errno == socket.EAI_AGAIN
-    return isinstance(error, OSError) and error.errno in TRANSIENT_ERRNOS
+    return isinstance(error, OSError) and (error.errno in TRANSIENT_ERRNOS
+                                          or getattr(error, 'winerror', None) in TRANSIENT_WINERRORS)
 
 
 def worker_probe(url, sha, idle, timeout):
@@ -141,8 +143,10 @@ def run_attempt(url, sha, idle, deadline):
     budget = max(.001, deadline - time.monotonic())
     request = json.dumps({'url': url, 'sha': sha, 'idle': idle, 'timeout': budget}).encode()
     try:
+        # Windows os.environ normalizes keys to uppercase. Dropping SYSTEMROOT
+        # prevents Winsock initialization even for a loopback fixture.
         env = {key: value for key, value in os.environ.items()
-               if key in {'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL'}}
+               if key.upper() in {'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL'}}
         process = subprocess.Popen([sys.executable, '-I', '-B', str(Path(__file__).resolve()), '--worker'],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL, env=env)

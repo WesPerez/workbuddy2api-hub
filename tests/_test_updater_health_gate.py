@@ -182,7 +182,8 @@ class HealthProbeTests(unittest.TestCase):
         process.communicate.side_effect = [subprocess.TimeoutExpired('reader', 1),
                                            (b'{"phase": "read"}\n', b'')]
         url = 'http://127.0.0.1/healthz?token=private-value'
-        with mock.patch.object(hp.subprocess, 'Popen', return_value=process) as spawn:
+        with mock.patch.dict(hp.os.environ, {'SYSTEMROOT': 'fixture-system-root', 'GH_TOKEN': 'private-value'}), \
+             mock.patch.object(hp.subprocess, 'Popen', return_value=process) as spawn:
             result = hp.run_attempt(url, COMMIT, True, time.monotonic() + 1)
         self.assertEqual(result['reason'], 'read_timeout')
         process.kill.assert_called_once()
@@ -193,6 +194,7 @@ class HealthProbeTests(unittest.TestCase):
         self.assertIs(kwargs['stderr'], hp.subprocess.DEVNULL)
         self.assertNotIn('PYTHONPATH', kwargs['env'])
         self.assertNotIn('GH_TOKEN', kwargs['env'])
+        self.assertEqual(kwargs['env']['SYSTEMROOT'], 'fixture-system-root')
         self.assertIn(url.encode(), process.communicate.call_args_list[0].args[0])
 
     def test_worker_failures_remain_fail_closed(self):
