@@ -136,7 +136,21 @@ class HealthProbeTests(unittest.TestCase):
             port = sock.getsockname()[1]
         result = hp.probe_health('http://127.0.0.1:%d/healthz' % port, COMMIT)
         self.assertFalse(result)
-        self.assertEqual((result.reason, result.attempts), ('transport_failure', 2))
+        # Windows can spend the remaining deadline waiting for the closed
+        # socket instead of returning ECONNREFUSED immediately. Both are real
+        # classified failures; acceptance and the two-attempt cap stay strict.
+        self.assertIn(result.reason, ('transport_failure', 'connection_timeout'))
+        self.assertEqual(result.attempts, 2)
+        self.assertLess(result.elapsed_ms, 4500)
+
+    def test_refused_connection_cause_is_classified_without_a_socket_race(self):
+        refused = ConnectionRefusedError(hp.errno.ECONNREFUSED, 'fixture private error')
+        opener = mock.Mock()
+        opener.open.side_effect = hp.urllib.error.URLError(refused)
+        with mock.patch.object(hp.urllib.request, 'build_opener', return_value=opener), \
+             contextlib.redirect_stdout(io.StringIO()):
+            result = hp.worker_probe('http://fixture', COMMIT, False, 4)
+        self.assertEqual(result, {'reason': 'transport_failure', 'retryable': True})
 
     def test_delayed_headers_and_reads_are_classified_and_bounded(self):
         for row, reason in [({'header_delay': 1.2}, 'connection_timeout'),
