@@ -140,8 +140,16 @@ class HealthProbeTests(unittest.TestCase):
         # socket instead of returning ECONNREFUSED immediately. Both are real
         # classified failures; acceptance and the two-attempt cap stay strict.
         self.assertIn(result.reason, ('transport_failure', 'connection_timeout'))
-        self.assertEqual(result.attempts, 2)
+        self.assertIn(result.attempts, (1, 2))
         self.assertLess(result.elapsed_ms, 4500)
+
+    def test_transient_retry_exhaustion_is_rejected_within_one_budget(self):
+        with mock.patch.object(hp, 'run_attempt',
+                               return_value={'reason': 'transport_failure', 'retryable': True}) as attempt:
+            result = hp.probe_health('http://fixture', COMMIT, total_timeout=.5)
+        self.assertFalse(result)
+        self.assertEqual((result.reason, result.attempts, attempt.call_count), ('transport_failure', 2, 2))
+        self.assertLess(result.elapsed_ms, 600)
 
     def test_refused_connection_cause_is_classified_without_a_socket_race(self):
         refused = ConnectionRefusedError(hp.errno.ECONNREFUSED, 'fixture private error')
@@ -184,7 +192,10 @@ class HealthProbeTests(unittest.TestCase):
             with self.subTest(row=row):
                 start = time.monotonic()
                 with server([row]) as (url, calls):
-                    result = hp.probe_health(url, COMMIT, total_timeout=.8)
+                    # Isolate one reader's total deadline. A socket timeout may
+                    # legally leave budget for a second transient retry, which
+                    # is covered separately rather than inferred from timing.
+                    result = hp.probe_health(url, COMMIT, total_timeout=.8, max_attempts=1)
                     elapsed = time.monotonic() - start
                     self.assertFalse(result)
                     # Exact read-phase classification is asserted above and
@@ -254,6 +265,16 @@ class HealthProbeTests(unittest.TestCase):
             result = hp.probe_health('http://fixture', COMMIT, total_timeout=.01)
         self.assertFalse(result)
         self.assertEqual(result.reason, 'deadline_exhausted')
+
+    def test_retry_cannot_start_after_total_budget_exhaustion(self):
+        def exhausted(*args):
+            time.sleep(.03)
+            return {'reason': 'read_timeout', 'retryable': True}
+        with mock.patch.object(hp, 'run_attempt', side_effect=exhausted) as attempt:
+            result = hp.probe_health('http://fixture', COMMIT, total_timeout=.01)
+        self.assertFalse(result)
+        self.assertEqual(result.attempts, 1)
+        attempt.assert_called_once()
 
 
 @unittest.skipIf(os.name == 'nt', 'Production updater requires Linux flock/symlinks')
