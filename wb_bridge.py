@@ -14,6 +14,30 @@ import urllib.parse
 import uuid
 
 
+def _read_release_commit():
+    """Load immutable release identity before serving, not on a health request.
+
+    Resolve this module's release, not a later `current` symlink target. Invalid
+    metadata stays development and cannot pass the updater's exact SHA check.
+    A new process/import is required to load a different release identity.
+    """
+    try:
+        with Path(__file__).resolve().with_name("release.json").open("rb") as stream:
+            raw = stream.read(4097)
+        if len(raw) > 4096:
+            return "development"
+        record = json.loads(raw)
+        commit = record.get("commit") if isinstance(record, dict) else None
+        if isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit):
+            return commit
+    except (OSError, ValueError):
+        pass
+    return "development"
+
+
+_HEALTH_COMMIT = _read_release_commit()
+
+
 def data_root():
     return Path(os.environ.get("WB_DATA_DIR", "/var/lib/workbuddy-hub"))
 
@@ -458,11 +482,10 @@ def instance(pool):
 
 def health(proxy, trace=None):
     mark = trace or (lambda stage: None)
+    # Preserve stage names; release is now an in-memory identity lookup.
+    # Busy state below remains live per request, never cached.
     mark('release_read')
-    try:
-        commit = json.loads(Path(__file__).with_name("release.json").read_text())["commit"]
-    except (OSError, ValueError, KeyError):
-        commit = "development"
+    commit = _HEALTH_COMMIT
     mark('release_done')
     mark('busy_read')
     busy = max(0, proxy.MAX_CONCURRENT_CHAT - proxy._chat_slots._value)
