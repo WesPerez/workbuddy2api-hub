@@ -236,9 +236,39 @@ class HealthProbeTests(unittest.TestCase):
         row = json.loads(text)
         self.assertLessEqual(set(row), {'state', 'reason', 'elapsed_ms', 'attempts',
                                        'attempt_reasons', 'http_status', 'observed_commit', 'commit',
-                                       'last_phase', 'phase_offsets_ms', 'timeout_source'})
+                                       'last_phase', 'phase_offsets_ms', 'timeout_source', 'probe_id'})
         self.assertEqual(row['last_phase'], 'body_complete')
         self.assertLessEqual(set(row['phase_offsets_ms']), set(hp.PHASES))
+        self.assertRegex(row['probe_id'], r'^[a-f0-9]{32}$')
+
+    def test_opaque_probe_id_is_sent_and_last_attempt_only_is_logged(self):
+        opener = mock.Mock()
+        opener.open.side_effect = hp.urllib.error.URLError(ConnectionRefusedError())
+        with mock.patch.object(hp.urllib.request, 'build_opener', return_value=opener), \
+             contextlib.redirect_stdout(io.StringIO()):
+            hp.worker_probe('http://fixture/healthz', COMMIT, False, 4, 'a' * 32)
+        request = opener.open.call_args[0][0]
+        self.assertEqual(request.get_header('X-wb-health-probe'), 'a' * 32)
+        rows = [{'reason': 'transport_failure', 'retryable': True, 'probe_id': 'a' * 32},
+                {'reason': 'ok', 'probe_id': 'b' * 32}]
+        with mock.patch.object(hp, 'run_attempt', side_effect=rows):
+            result = hp.probe_health('http://fixture', COMMIT)
+        self.assertTrue(result)
+        self.assertEqual(result.safe_fields()['probe_id'], 'b' * 32)
+        self.assertNotIn('a' * 32, json.dumps(result.safe_fields()))
+        self.assertNotIn('probe_id', hp.HealthResult(False, 'probe_error', probe_id='secret').safe_fields())
+
+    def test_parent_generated_id_is_in_worker_stdin_even_on_timeout(self):
+        process = mock.Mock()
+        process.poll.side_effect = [None, -9]
+        process.communicate.side_effect = [subprocess.TimeoutExpired('reader', 1), (b'', b'')]
+        with mock.patch.object(hp.subprocess, 'Popen', return_value=process) as spawn, \
+             mock.patch.object(hp.os, 'urandom', return_value=b'\xab' * 16):
+            row = hp.run_attempt('http://fixture', COMMIT, False, time.monotonic() + 1)
+        payload = json.loads(process.communicate.call_args_list[0][0][0])
+        self.assertEqual(payload['probe_id'], 'ab' * 16)
+        self.assertEqual(row['probe_id'], payload['probe_id'])
+        self.assertNotIn(payload['probe_id'], repr(spawn.call_args))
 
     def test_reader_timeout_kills_and_reaps_without_leaking_url_in_argv(self):
         process = mock.Mock()

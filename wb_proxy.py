@@ -59,6 +59,7 @@ import urllib.request
 import uuid
 import subprocess
 import wb_bridge
+import wb_health_diagnostics
 import wb_accounts
 import wb_activity
 import wb_atrest
@@ -16446,6 +16447,12 @@ class Handler(BaseHTTPRequestHandler):
     # bare "414 Request-URI Too Long" for anything longer. Raise it and reply in
     # the normal JSON error shape so an over-long URL is diagnosable.
     max_request_line = 1024 * 1024
+    def setup(self):
+        at = wb_health_diagnostics.DIAGNOSTICS.take_accepted(self.request)
+        self._health_early = {'handler_start': time.monotonic_ns()}
+        if at is not None:
+            self._health_early['accepted'] = at
+        super().setup()
     def handle_one_request(self):
         # Reset per-request auth state. HTTP/1.1 keeps the connection alive, so
         # one Handler instance serves many requests; a request that authenticates
@@ -16459,6 +16466,10 @@ class Handler(BaseHTTPRequestHandler):
         # Body-tracking state must also start clean for every request, otherwise
         # a later drain would skip a body that has not been read yet.
         self._body_consumed = False
+        self._health_probe_id = None
+        self._health_outcome = 'complete'
+        if not hasattr(self, '_health_early'):
+            self._health_early = {}
         try:
             self.raw_requestline = self.rfile.readline(self.max_request_line + 1)
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
@@ -16489,14 +16500,28 @@ class Handler(BaseHTTPRequestHandler):
         if not self.raw_requestline:
             self.close_connection = True
             return
+        self._health_early['request_line_done'] = time.monotonic_ns()
         if not self.parse_request():
             return
+        self._health_probe_id = wb_health_diagnostics.DIAGNOSTICS.begin(self)
         mname = 'do_' + self.command
         if not hasattr(self, mname):
             self.send_error(501, "Unsupported method (%r)" % self.command)
             return
-        getattr(self, mname)()
-        self.wfile.flush()
+        try:
+            getattr(self, mname)()
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self._health_outcome = 'write_error'
+            raise
+        except Exception:
+            if self._health_outcome == 'complete':
+                self._health_outcome = 'handler_error'
+            raise
+        finally:
+            wb_health_diagnostics.DIAGNOSTICS.finish(self._health_probe_id, self._health_outcome)
+            # A keep-alive request must not inherit accept/parse timings.
+            self._health_early = {}
     def handle(self):
         try:
             super().handle()
@@ -16526,6 +16551,7 @@ class Handler(BaseHTTPRequestHandler):
         log(fmt % args)
     def _json(self, code, obj):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        wb_health_diagnostics.mark(self, 'headers_write', code)
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -16543,6 +16569,8 @@ class Handler(BaseHTTPRequestHandler):
         if cors_origin_allowed(getattr(self, "path", "") or ""):
             self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
+        wb_health_diagnostics.mark(self, 'headers_written')
+        wb_health_diagnostics.mark(self, 'body_write')
         self.wfile.write(body)
         # Flush here rather than relying on the caller: with HTTP/1.1
         # keep-alive the client blocks until the response is actually on the
@@ -16550,7 +16578,9 @@ class Handler(BaseHTTPRequestHandler):
         # like a hung request.
         try:
             self.wfile.flush()
+            wb_health_diagnostics.mark(self, 'body_flushed')
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self._health_outcome = 'write_error'
             self.close_connection = True
     def _json_cached(self, code, data_fn, etag_fn):
         """带 TTL 缓存的只读接口：_json() + 条件请求（命中 If-None-Match 回 304）。
@@ -20491,6 +20521,13 @@ class GatewayServer(ThreadingHTTPServer):
     类属性——实例化之后再改就晚了。
     """
     request_queue_size = 128
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        wb_health_diagnostics.DIAGNOSTICS.start()
+    def get_request(self):
+        sock, address = super().get_request()
+        wb_health_diagnostics.DIAGNOSTICS.accepted(sock, address)
+        return sock, address
 
 def _serve_forever(args):
     try:
