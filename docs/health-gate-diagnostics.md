@@ -1,5 +1,24 @@
 # WorkBuddy 部署健康门禁诊断 / Deployment health diagnostics
 
+## 不可变身份热路径优化 / Immutable identity hot path
+
+正式 0c84d7b 的 02:23:39–04:05 CST 自然窗口中，39 个带 ID client 结果为19成功/20超时，
+全部可关联 server ID；18个超时 terminal 有完整 release 阶段，间隔315–4747ms。
+这是阶段墙钟间隔，含调度/换页/诊断开销，不等于纯磁盘耗时，不能据此声称GIL或swap单一根因。
+其他解析、busy和发送阶段也有延迟。分别起点的client/server offset不能直接相减。
+
+本次最小改动在 module import、监听前一次读取本 release 的元数据（最多4097字节，4096上限），
+只接受对象内40位小写hex commit；缺失/非法则 development，继续被正式 updater exact SHA拒绝。
+请求只读固定字符串，不缓存busy、不改重试/四秒门禁/部署锁/drain/回滚。新SHA须由新进程加载，
+不能让已运行旧进程因current链接或元数据改写冒充新版本。release_read/release_done旧阶段名保留，
+但本候选后代表内存身份读取，不再代表磁盘读。资源配置及其他应用不改。
+
+This bounded optimization removes per-probe release metadata I/O, not all scheduling/page-in latency.
+Identity is loaded once before serving; invalid metadata fails closed and cannot heal by a later file rewrite.
+Busy remains live. Synthetic hosted tests cover metadata types/size/errors, immutable identity and live busy;
+existing updater same-SHA/idle/drain/rollback/deadline fixtures remain required. No account/upstream request.
+Natural post-deployment outcomes are still required; no root-cause completion claim is made.
+
 本候选仅增强健康探测的原因分类和保守拒绝，不声称修复了已经证明的 GIL 或网络根因。
 The candidate adds classified, fail-closed health results; it does not claim a proven GIL/network root cause.
 

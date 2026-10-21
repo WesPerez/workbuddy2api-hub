@@ -9,12 +9,13 @@
   3. 静默是按路径边界匹配的，/healthz-other 这类相邻路径不受影响。
 
 Run with: python tests/_test_health_probe_logging.py
-No network, no credentials, nothing written to disk.
+Only synthetic loopback fixtures; no credentials or upstream requests.
 """
 import os
 import sys
 import unittest
 import json
+import io
 import socket
 import threading
 import time
@@ -196,7 +197,7 @@ class HealthServerDiagnosticsTests(unittest.TestCase):
         self.assertEqual(row['last_stage'], 'headers_write')
         self.assertNotIn('secret', json.dumps(row))
 
-    def test_health_callback_does_not_change_busy_or_read_twice(self):
+    def test_health_callback_keeps_live_busy_without_release_io(self):
         proxy = SimpleNamespace(MAX_CONCURRENT_CHAT=4, _chat_slots=SimpleNamespace(_value=2),
                                 POOL=SimpleNamespace(accounts=[SimpleNamespace(
                                     _refresh_lock=SimpleNamespace(locked=lambda: True),
@@ -205,13 +206,51 @@ class HealthServerDiagnosticsTests(unittest.TestCase):
         stages = []
         with mock.patch.object(wb_bridge, '_bridge', SimpleNamespace(active=3)), \
              mock.patch.object(wb_bridge, 'daily_enabled', return_value=False) as daily, \
-             mock.patch.object(wb_bridge.Path, 'read_text', return_value='{"commit":"development"}') as release:
+             mock.patch.object(wb_bridge, '_HEALTH_COMMIT', 'a' * 40), \
+             mock.patch.object(wb_bridge.Path, 'open', side_effect=AssertionError('health must not read disk')) as release:
             value = wb_bridge.health(proxy, stages.append)
         self.assertEqual(value['activeJobs'], 7)
         self.assertFalse(value['internationalDailyChat'])
         daily.assert_called_once()
-        release.assert_called_once()
+        self.assertEqual(value['commit'], 'a' * 40)
+        release.assert_not_called()
         self.assertEqual(stages, ['release_read', 'release_done', 'busy_read', 'busy_done', 'daily_read', 'daily_done'])
+
+    def test_release_identity_is_bounded_and_invalid_metadata_fails_closed(self):
+        values = [b'[]', b'null', b'1', b'{}', b'{"commit":true}', b'{"commit":1}',
+                  b'{"commit":null}', b'{"commit":[]}', b'{"commit":"short"}',
+                  json.dumps({'commit': 'A' * 40}).encode(), b'broken', b'\xff',
+                  json.dumps({'commit': 'a' * 40}).encode() + b' ' * 4096]
+        for raw in values:
+            with self.subTest(raw=raw[:60]), mock.patch.object(wb_bridge.Path, 'open', return_value=io.BytesIO(raw)):
+                self.assertEqual(wb_bridge._read_release_commit(), 'development')
+        with mock.patch.object(wb_bridge.Path, 'open', side_effect=OSError('unavailable')):
+            self.assertEqual(wb_bridge._read_release_commit(), 'development')
+        stream = mock.MagicMock()
+        stream.__enter__.return_value = stream
+        stream.read.return_value = json.dumps({'commit': 'b' * 40}).encode()
+        with mock.patch.object(wb_bridge.Path, 'open', return_value=stream):
+            self.assertEqual(wb_bridge._read_release_commit(), 'b' * 40)
+        stream.read.assert_called_once_with(4097)
+
+    def test_import_pins_release_identity_but_busy_stays_live(self):
+        source = wb_bridge.Path(wb_bridge.__file__).read_text()
+        code = compile(source, wb_bridge.__file__, 'exec')
+        proxy = SimpleNamespace(MAX_CONCURRENT_CHAT=4, _chat_slots=SimpleNamespace(_value=4),
+                                POOL=None, SCHEDULER=None)
+        for raw, expected in ((json.dumps({'commit': 'c' * 40}).encode(), 'c' * 40),
+                              (b'[]', 'development')):
+            module = {'__name__': 'synthetic_health_identity', '__file__': wb_bridge.__file__}
+            with mock.patch.object(wb_bridge.Path, 'open', return_value=io.BytesIO(raw)) as release:
+                exec(code, module)
+            release.assert_called_once()
+            with mock.patch.object(wb_bridge.Path, 'open', side_effect=AssertionError('no late identity read')):
+                proxy._chat_slots._value = 4
+                self.assertEqual(module['health'](proxy)['commit'], expected)
+                self.assertEqual(module['health'](proxy)['activeJobs'], 0)
+                proxy._chat_slots._value = 1
+                self.assertEqual(module['health'](proxy)['activeJobs'], 3)
+                self.assertEqual(module['health'](proxy)['commit'], expected)
 
     def test_real_gateway_pending_health_read_then_complete_without_access_log(self):
         self.diag.clock = time.monotonic_ns
