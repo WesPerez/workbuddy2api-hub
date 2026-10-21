@@ -924,9 +924,12 @@ class RemainingUsageTests(unittest.TestCase):
         self.assertTrue(find_row(data, "acct-A")["cooling"])
 
     def test_live_event_dedupes_against_the_log_row(self):
-        reset = time.time() + 30 * 60
-        _, detail = reset_epoch(time.strftime("%Y-%m-%d %H:%M:%S",
-                                              time.localtime(reset)))
+        # Production receives the parser's integer UTC+8 epoch. A fractional
+        # local-wall-clock fixture is NOT the same reset key in other zones.
+        # Keep the future cooling instant but derive both sources identically.
+        reset = int(time.time() + 30 * 60)
+        detail = cap_detail(reset)
+        self.assertEqual(P.parse_rate_limit_reset(detail), reset)
         write_log([
             usage_row(reset - 2 * HOUR, "acct-A", 900),
             # The 429 row the log keeps for this same cap (the last account of

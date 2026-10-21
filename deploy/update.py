@@ -16,6 +16,7 @@ import time
 import urllib.request
 import zipfile
 import ci_evidence as evidence
+from health_probe import probe_health
 
 PROJECT = json.loads(Path(__file__).with_name('project.json').read_text())
 SHA = re.compile(r'^[a-f0-9]{40}$')
@@ -61,13 +62,14 @@ class GitHub(evidence.GitHub):
 
 
 def health(url, sha=None, idle=False):
-    try:
-        with urllib.request.urlopen(url, timeout=4) as response:
-            data = json.loads(response.read(65536))
-        return (data.get('ok') is True and (not sha or data.get('commit') == sha)
-                and (not idle or data.get('activeJobs', 1) == 0))
-    except (OSError, ValueError):
-        return False
+    return probe_health(url, sha, idle)
+
+
+def health_event(state, result, sha=None):
+    record = dict(state=state, **result.safe_fields())
+    if sha is not None and SHA.fullmatch(sha):
+        record['commit'] = sha
+    print(json.dumps(record))
 
 
 def standby_candidate(sha):
@@ -155,20 +157,23 @@ def main():
         current = root / 'current'
         old = current.resolve() if current.is_symlink() else None
         if old and old.name == sha:
-            if not health(config['health'], sha):
-                print(json.dumps({'state': 'unhealthy_current', 'commit': sha})); return
+            probe = health(config['health'], sha)
+            if not probe:
+                health_event('unhealthy_current', probe, sha); return
             data = Path(config['data'])
             data.mkdir(mode=0o700, parents=True, exist_ok=True)
             marker = data / '.draining'
             if marker.exists() and marker.read_text() == 'update:' + sha:
                 marker.unlink()
-            print(json.dumps({'state': 'current', 'commit': sha})); return
+            health_event('current', probe, sha); return
         if verified is None:
             print(json.dumps({'state': 'waiting_for_ci', 'commit': sha})); return
         if not args.apply:
             print(json.dumps({'state': 'verified', 'commit': sha})); return
-        if old and not health(config['health'], idle=True):
-            print(json.dumps({'state': 'waiting_for_idle'})); return
+        if old:
+            probe = health(config['health'], old.name, idle=True)
+            if not probe:
+                health_event('waiting_for_idle', probe); return
         if shutil.disk_usage(root.parent).free < 2 * 1024**3:
             raise ValueError('Insufficient deployment space')
         with tempfile.TemporaryDirectory(prefix='download-', dir=state) as temporary:
@@ -201,12 +206,14 @@ def main():
             marker.write_text('update:' + sha)
             if old:
                 for _ in range(30):
-                    if health(config['health'], idle=True):
+                    probe = health(config['health'], old.name, idle=True)
+                    if probe:
                         break
+                    health_event('draining_health', probe)
                     time.sleep(1)
                 else:
                     marker.unlink()
-                    print(json.dumps({'state': 'waiting_for_idle'})); return
+                    health_event('waiting_for_idle', probe); return
             try:
                 if old:
                     command(['systemctl', 'stop', config['unit']], timeout=45)
@@ -214,8 +221,10 @@ def main():
                 command(install_args + ['--activate'], timeout=300)
                 command(['systemctl', 'start', config['unit']], timeout=45)
                 for _ in range(30):
-                    if health(config['health'], sha):
+                    probe = health(config['health'], sha)
+                    if probe:
                         break
+                    health_event('new_service_health', probe, sha)
                     time.sleep(1)
                 else:
                     raise ValueError('New service did not pass health verification')
