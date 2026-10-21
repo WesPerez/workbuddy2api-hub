@@ -416,6 +416,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
+- 更新器健康诊断补充最后一次探测的进程启动、TCP、请求发送、响应头/正文阶段与截止来源；仍使用同一个 4 秒总预算、至多两次瞬时传输尝试，身份/结构/busy 失败不放行。阶段缺失不等于请求未发生，不推断 GIL 或账号健康。/ Updater health events now report bounded milestones of the last attempt and the timeout source, without changing the four-second deadline or fail-closed identity/idle gates. Missing milestones are unknown, not proof of an unissued request or a root cause.
+
 - 部署健康门禁增加脱敏原因、HTTP 状态、耗时和尝试次数；整个 GET 探测使用单一 4 秒预算，只对瞬时传输/超时有限重试。SHA、busy、ok=false、响应结构错误仍拒绝更新；此改动不预设反复失败的根因，也不调用真实账号或模型。
 
 - 受管出口的分块流式读取继续记录响应完成、空流和传输故障；三种流式接口在验证有效 `[DONE]` 后记录完成，无需等待连接 EOF。`[DONE]` 前的断流计入原租约的恢复阈值，不重放请求，客户端取消不计为出口故障。

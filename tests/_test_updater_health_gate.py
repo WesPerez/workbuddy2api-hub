@@ -91,6 +91,11 @@ class HealthProbeTests(unittest.TestCase):
             self.assertTrue(result)
             self.assertEqual((result.reason, result.http_status, result.attempts, calls), ('ok', 200, 1, 1))
             self.assertEqual(result.observed_commit, COMMIT)
+            self.assertEqual(result.last_phase, 'body_complete')
+            self.assertEqual(tuple(result.phase_offsets_ms), hp.PHASES)
+            offsets = list(result.phase_offsets_ms.values())
+            self.assertEqual(offsets, sorted(offsets))
+            self.assertLessEqual(offsets[-1], result.elapsed_ms)
 
     def test_semantic_failures_are_never_retried(self):
         rows = [(dict(GOOD, commit='2' * 40), 'commit_mismatch'),
@@ -183,6 +188,7 @@ class HealthProbeTests(unittest.TestCase):
                 result = hp.worker_probe('http://fixture', COMMIT, False, .8)
                 self.assertEqual(result['reason'], reason)
                 self.assertTrue(result['retryable'])
+                self.assertEqual(result['timeout_source'], 'socket_timeout')
                 opener.open.assert_called_once()
                 if phase == 'read':
                     response.read.assert_called_once_with(hp.MAX_RESPONSE + 1)
@@ -203,6 +209,8 @@ class HealthProbeTests(unittest.TestCase):
                     # phase may exhaust the same total budget; never success.
                     self.assertIn(result.reason, ('connection_timeout', 'read_timeout'))
                     self.assertEqual(result.attempts, 1)
+                    self.assertIn(result.last_phase, hp.PHASES)
+                    self.assertIn(result.timeout_source, hp.TIMEOUT_SOURCES)
                     # Small process creation/reaping/scheduler overhead is not
                     # treated as permission for another full timeout budget.
                     self.assertLess(elapsed, 1.5)
@@ -227,18 +235,29 @@ class HealthProbeTests(unittest.TestCase):
         self.assertNotIn('token', text)
         row = json.loads(text)
         self.assertLessEqual(set(row), {'state', 'reason', 'elapsed_ms', 'attempts',
-                                       'attempt_reasons', 'http_status', 'observed_commit', 'commit'})
+                                       'attempt_reasons', 'http_status', 'observed_commit', 'commit',
+                                       'last_phase', 'phase_offsets_ms', 'timeout_source'})
+        self.assertEqual(row['last_phase'], 'body_complete')
+        self.assertLessEqual(set(row['phase_offsets_ms']), set(hp.PHASES))
 
     def test_reader_timeout_kills_and_reaps_without_leaking_url_in_argv(self):
         process = mock.Mock()
         process.poll.side_effect = [None, -9]
-        process.communicate.side_effect = [subprocess.TimeoutExpired('reader', 1),
-                                           (b'{"phase": "read"}\n', b'')]
+        partial = []
+        def communicate(*args, **kwargs):
+            if not partial:
+                partial.append(json.dumps({'phase': 'headers_received', 'http_status': 200,
+                                           'at_ns': time.monotonic_ns()}).encode() + b'\n')
+                raise subprocess.TimeoutExpired('reader', 1, output=partial[0])
+            return partial[0], b''
+        process.communicate.side_effect = communicate
         url = 'http://127.0.0.1/healthz?token=private-value'
         with mock.patch.dict(hp.os.environ, {'SYSTEMROOT': 'fixture-system-root', 'GH_TOKEN': 'private-value'}), \
              mock.patch.object(hp.subprocess, 'Popen', return_value=process) as spawn:
             result = hp.run_attempt(url, COMMIT, True, time.monotonic() + 1)
         self.assertEqual(result['reason'], 'read_timeout')
+        self.assertEqual(result['last_phase'], 'headers_received')
+        self.assertEqual(result['timeout_source'], 'parent_deadline')
         process.kill.assert_called_once()
         process.wait.assert_called_once()
         args, kwargs = spawn.call_args
@@ -249,6 +268,148 @@ class HealthProbeTests(unittest.TestCase):
         self.assertNotIn('GH_TOKEN', kwargs['env'])
         self.assertEqual(kwargs['env']['SYSTEMROOT'], 'fixture-system-root')
         self.assertIn(url.encode(), process.communicate.call_args_list[0].args[0])
+
+    def test_trace_missing_invalid_future_and_secret_fields_are_not_evidence(self):
+        rows = [{'phase': 'worker_boot', 'at_ns': 101},
+                {'phase': 'private-token', 'at_ns': 102},
+                {'phase': 'connect_start', 'at_ns': True},
+                {'phase': 'headers_received', 'at_ns': 1000, 'http_status': 200},
+                {'phase': 'worker_ready', 'at_ns': 104, 'secret': 'do-not-log'},
+                {'phase': 'worker_boot', 'at_ns': 105}]
+        raw = b'\n'.join(json.dumps(row).encode() for row in rows)
+        trace = hp.decode_trace(raw, 100, 110)
+        self.assertEqual(trace['last_phase'], 'worker_ready')
+        self.assertEqual(set(trace['phase_offsets_ms']), {'attempt_start', 'worker_boot', 'worker_ready'})
+        self.assertNotIn('http_status', trace)
+        self.assertNotIn('do-not-log', json.dumps(trace))
+        for raw in (b'', b'x' * 4097, b'[]\n{"phase":[]}', b'{"phase":"worker_boot"'):
+            self.assertEqual(hp.decode_trace(raw, 100, 110),
+                             {'last_phase': 'attempt_start', 'phase_offsets_ms': {'attempt_start': 0}})
+        row = hp.HealthResult(False, 'probe_error', last_phase='private',
+                              timeout_source='private', phase_offsets_ms={'private': 9, 'worker_boot': True,
+                                                                        'connect_start': -1}).safe_fields()
+        self.assertNotIn('private', json.dumps(row))
+        self.assertNotIn('phase_offsets_ms', row)
+
+    def test_timeout_before_boot_is_unknown_start_not_tcp_failure(self):
+        process = mock.Mock()
+        process.poll.side_effect = [None, -9]
+        process.communicate.side_effect = [subprocess.TimeoutExpired('reader', 1), (b'', b'')]
+        with mock.patch.object(hp.subprocess, 'Popen', return_value=process):
+            row = hp.run_attempt('http://fixture', COMMIT, False, time.monotonic() + 1)
+        self.assertEqual((row['reason'], row['last_phase'], row['timeout_source']),
+                         ('connection_timeout', 'attempt_start', 'parent_deadline'))
+        self.assertEqual(row['phase_offsets_ms'], {'attempt_start': 0})
+
+    def test_observed_http_failure_before_kill_never_becomes_retryable(self):
+        process = mock.Mock()
+        process.poll.side_effect = [None, -9]
+        partial = []
+        def communicate(*args, **kwargs):
+            if not partial:
+                partial.append(json.dumps({'phase': 'headers_received', 'http_status': 503,
+                                           'at_ns': time.monotonic_ns()}).encode())
+                raise subprocess.TimeoutExpired('reader', 1)
+            return partial[0], b''
+        process.communicate.side_effect = communicate
+        with mock.patch.object(hp.subprocess, 'Popen', return_value=process):
+            row = hp.run_attempt('http://fixture', COMMIT, False, time.monotonic() + 1)
+        self.assertEqual(row['reason'], 'http_status')
+        self.assertFalse(row['retryable'])
+        self.assertEqual(row['http_status'], 503)
+
+    def test_http_and_tls_connect_hooks_keep_real_connector_and_tls_order(self):
+        # No socket is opened. The HTTPS stdlib connect implementation still
+        # invokes our instance connector BEFORE its unchanged TLS wrap.
+        for kind in (hp.TracedHTTPConnection, hp.TracedHTTPSConnection):
+            trace = mock.Mock()
+            sock = mock.Mock()
+            connection = kind('fixture.invalid', trace=trace)
+            connector = mock.Mock(return_value=sock)
+            connection._create_connection = connector
+            if kind is hp.TracedHTTPSConnection:
+                def wrap(*args, **kwargs):
+                    self.assertEqual(trace.mark.call_args_list,
+                                     [mock.call('connect_start'), mock.call('tcp_connected')])
+                    return sock
+                connection._context = mock.Mock()
+                connection._context.wrap_socket.side_effect = wrap
+            connection.connect()
+            connector.assert_called_once()
+            self.assertIs(connection._create_connection, connector)
+            self.assertEqual(trace.mark.call_args_list,
+                             [mock.call('connect_start'), mock.call('tcp_connected'),
+                              mock.call('connection_ready')])
+            connection.close()
+
+    def test_request_sent_and_header_complete_hooks_do_not_log_payload(self):
+        trace = mock.Mock()
+        connection = hp.TracedHTTPConnection('fixture.invalid', trace=trace)
+        with mock.patch.object(hp.http.client.HTTPConnection, 'request') as request:
+            connection.request('GET', '/private?token=secret')
+            request.assert_called_once_with('GET', '/private?token=secret')
+        trace.mark.assert_called_once_with('request_sent')
+        trace.reset_mock()
+        response = mock.Mock(status=200)
+        with mock.patch.object(hp.http.client.HTTPConnection, 'getresponse', return_value=response):
+            self.assertIs(connection.getresponse(), response)
+        trace.mark.assert_called_once_with('headers_received', 200)
+
+    def test_redirect_proxy_and_tls_defaults_stay_fail_closed(self):
+        trace = hp.PhaseTrace()
+        handler = hp.TracedHTTPSHandler(trace)
+        import ssl
+        request = hp.urllib.request.Request('https://fixture.invalid/healthz')
+        with mock.patch.object(handler, 'do_open') as opened:
+            handler.https_open(request)
+        self.assertIs(opened.call_args.kwargs['context'], handler._context)
+        # 3.9's handler delegates None to HTTPSConnection's secure default;
+        # 3.12 constructs the context in the handler instead.
+        factory = opened.call_args.args[0]
+        connection = factory('fixture.invalid', **opened.call_args.kwargs)
+        self.assertEqual(connection._context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(connection._context.check_hostname)
+        connection.close()
+        opener = hp.urllib.request.build_opener(hp.urllib.request.ProxyHandler({}), hp.NoRedirect(),
+                                               hp.TracedHTTPHandler(trace), handler)
+        self.assertEqual(sum(isinstance(h, hp.urllib.request.HTTPHandler) for h in opener.handlers), 1)
+        self.assertEqual(sum(isinstance(h, hp.urllib.request.HTTPSHandler) for h in opener.handlers), 1)
+        self.assertTrue(any(isinstance(h, hp.NoRedirect) for h in opener.handlers))
+        self.assertFalse(any(getattr(h, 'proxies', {}) for h in opener.handlers))
+
+    def test_trace_output_is_bounded_and_final_attempt_is_labelled(self):
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            trace = hp.PhaseTrace()
+            for _ in range(100):
+                for phase in hp.PHASES:
+                    trace.mark(phase)
+        self.assertEqual(len(stream.getvalue().splitlines()), len(hp.PHASES))
+        self.assertLess(len(stream.getvalue()), hp.MAX_WORKER_OUTPUT)
+        first = {'reason': 'transport_failure', 'retryable': True, 'last_phase': 'connect_start',
+                 'phase_offsets_ms': {'attempt_start': 0, 'connect_start': 100}}
+        last = {'reason': 'ok', 'last_phase': 'body_complete',
+                'phase_offsets_ms': {'attempt_start': 0, 'body_complete': 50}}
+        with mock.patch.object(hp, 'run_attempt', side_effect=[first, last]):
+            result = hp.probe_health('http://fixture', COMMIT)
+        self.assertTrue(result)
+        self.assertEqual(result.attempt_reasons, ('transport_failure', 'ok'))
+        self.assertEqual(result.phase_offsets_ms, last['phase_offsets_ms'])
+
+    def test_telemetry_pipe_failure_does_not_replace_transport_classification(self):
+        trace = hp.PhaseTrace()
+        connection = hp.TracedHTTPConnection('fixture.invalid', trace=trace)
+        refused = ConnectionRefusedError(hp.errno.ECONNREFUSED, 'private exception')
+        connection._create_connection = mock.Mock(side_effect=refused)
+        with mock.patch('builtins.print', side_effect=BrokenPipeError()):
+            with self.assertRaises(ConnectionRefusedError) as caught:
+                connection.connect()
+            self.assertIs(caught.exception, refused)
+            opener = mock.Mock()
+            opener.open.side_effect = hp.urllib.error.URLError(refused)
+            with mock.patch.object(hp.urllib.request, 'build_opener', return_value=opener):
+                result = hp.worker_probe('http://fixture', COMMIT, False, 4)
+        self.assertEqual(result, {'reason': 'transport_failure', 'retryable': True})
 
     def test_worker_failures_remain_fail_closed(self):
         with mock.patch.object(hp.subprocess, 'Popen', side_effect=OSError('private-error')):
