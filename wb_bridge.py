@@ -456,17 +456,25 @@ def instance(pool):
     return _bridge
 
 
-def health(proxy):
+def health(proxy, trace=None):
+    mark = trace or (lambda stage: None)
+    mark('release_read')
     try:
         commit = json.loads(Path(__file__).with_name("release.json").read_text())["commit"]
     except (OSError, ValueError, KeyError):
         commit = "development"
+    mark('release_done')
+    mark('busy_read')
     busy = max(0, proxy.MAX_CONCURRENT_CHAT - proxy._chat_slots._value)
     busy += sum(a._refresh_lock.locked() or a._credits_lock.locked() for a in (proxy.POOL.accounts if proxy.POOL else []))
     busy += int(bool(proxy.SCHEDULER and proxy.SCHEDULER._run_lock.locked()))
     busy += _bridge.active if _bridge else 0
+    mark('busy_done')
+    mark('daily_read')
+    daily = daily_enabled()
+    mark('daily_done')
     return {"ok": True, "service": "workbuddy-hub", "protocol": "workbuddy-hub/v1",
-            "commit": commit, "activeJobs": busy, "internationalDailyChat": daily_enabled(),
+            "commit": commit, "activeJobs": busy, "internationalDailyChat": daily,
             "capabilities": {"loginCancel": True}}
 
 
@@ -483,7 +491,12 @@ def dispatch(handler, proxy):
         handler.wfile.write(body)
         return True
     if path == "/healthz" and handler.command == "GET":
-        handler._json(200, health(proxy))
+        import wb_health_diagnostics as diagnostics
+        diagnostics.mark(handler, 'health_enter')
+        result = (health(proxy, lambda stage: diagnostics.mark(handler, stage))
+                  if getattr(handler, '_health_probe_id', None) else health(proxy))
+        diagnostics.mark(handler, 'health_exit')
+        handler._json(200, result)
         return True
     if not path.startswith("/bridge/v1/"):
         return False

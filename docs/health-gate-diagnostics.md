@@ -56,3 +56,28 @@ All tests/builds stay GitHub-hosted under the server's user instruction.
 正式 mine 两次相同失败是旧 fixture 的精确 reset 不一致；修复只统一测试输入，
 不改变生产去重/限流、健康门禁或账号状态。三平台完整矩阵、回滚检查和 exact
 mine 包仍为发布前提；历史候选成功不能替代最终 SHA。
+
+
+## 服务端关联诊断 / Server correlation (candidate)
+
+客户端父进程每次 attempt 产生随机32hex `probe_id`，只传固定header并白名单记录最后一次ID。
+服务端仅 exact loopback GET `/healthz` + 单一合法 header 启用；query/其他route/外部请求不诊断，响应不变。
+接受阶段仅256个弱socket引用/时间的环（对象身份重核），识别前不写日志；解析成功后
+保留accept/handler/requestline/headers、release/busy/daily读取以及响应headers/body阶段。
+不重复读取配置/账号或改变busy。尚未解析的请求无法关联，缺失仍为preparse_unknown。
+
+Server telemetry accepts only an exact loopback health request with one opaque header.
+A weak-reference bounded pre-route ring cannot turn an absent record into evidence of no accept.
+Health reads and busy semantics are unchanged; callbacks mark the existing reads only.
+
+固定64active、128完成队列、每60秒最多32条新关联、120秒TTL；非阻塞锁遇争用直接丢诊断。
+观察者在serve_forever前启动，只有一个daemon，每0.25秒复制安全字段后释放锁再输出。
+正常请求一条完成摘要；4秒尚未完最多一条pending，随后terminal/expired，均非健康判定。
+stdout阻塞只阻观察者，队列仍有界；OS/GIL整体冻结时诊断也可能延后，不承诺硬墙钟。
+HTTP200/complete仅响应发送阶段，不等于业务/账号健康；pending不授权更新。
+
+The observer is lossy and bounded (64 active, 128 completed, 32 starts/minute, 120s TTL).
+It never writes while holding a diagnostic lock; handler hooks never wait for telemetry.
+Blocking stdout can lose/delay evidence, not block HTTP or relax the four-second client decision.
+No extra diagnostic HTTP request, model request, credentials, URL/body or account identifiers are logged.
+Natural correlation is still required to locate the failure; no GIL/root-cause claim is made.

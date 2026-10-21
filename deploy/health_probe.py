@@ -39,6 +39,7 @@ PHASES = ('attempt_start', 'worker_boot', 'worker_ready', 'connect_start',
           'headers_received', 'body_complete')
 TIMEOUT_SOURCES = frozenset({'parent_deadline', 'socket_timeout'})
 MAX_WORKER_OUTPUT = 4096
+PROBE_ID = re.compile(r'^[a-f0-9]{32}$')
 
 
 def safe_commit(value):
@@ -57,6 +58,7 @@ class HealthResult:
     last_phase: object = None
     phase_offsets_ms: object = None
     timeout_source: object = None
+    probe_id: object = None
 
     def __bool__(self):
         return self.accepted
@@ -80,6 +82,8 @@ class HealthResult:
                 result['phase_offsets_ms'] = offsets
         if isinstance(self.timeout_source, str) and self.timeout_source in TIMEOUT_SOURCES:
             result['timeout_source'] = self.timeout_source
+        if isinstance(self.probe_id, str) and PROBE_ID.fullmatch(self.probe_id):
+            result['probe_id'] = self.probe_id
         return result
 
 
@@ -233,7 +237,7 @@ def transient(error):
                                           or getattr(error, 'winerror', None) in TRANSIENT_WINERRORS)
 
 
-def worker_probe(url, sha, idle, timeout):
+def worker_probe(url, sha, idle, timeout, probe_id=None):
     phase = 'connect'
     status = None
     trace = PhaseTrace()
@@ -243,7 +247,9 @@ def worker_probe(url, sha, idle, timeout):
         # upstream. Do not inherit credential-bearing proxy environment.
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(),
                                             TracedHTTPHandler(trace), TracedHTTPSHandler(trace))
-        with opener.open(url, timeout=timeout) as response:
+        request = urllib.request.Request(url, headers={'X-WB-Health-Probe': probe_id}
+                                         if isinstance(probe_id, str) and PROBE_ID.fullmatch(probe_id) else {})
+        with opener.open(request, timeout=timeout) as response:
             status = response.status
             trace.mark('headers_received', status)
             if status != 200:
@@ -287,7 +293,11 @@ def decode_worker(output):
 def run_attempt(url, sha, idle, deadline):
     started_ns = time.monotonic_ns()
     budget = max(.001, deadline - time.monotonic())
-    request = json.dumps({'url': url, 'sha': sha, 'idle': idle, 'timeout': budget}).encode()
+    try:
+        probe_id = os.urandom(16).hex()  # opaque, per attempt; never account identity
+    except OSError:
+        probe_id = None  # Missing correlation must not change a health decision.
+    request = json.dumps({'url': url, 'sha': sha, 'idle': idle, 'timeout': budget, 'probe_id': probe_id}).encode()
     try:
         # The worker is this exact immutable release file, not an independently
         # upgraded protocol peer. Legacy {phase: read} has no timestamp/identity
@@ -304,7 +314,7 @@ def run_attempt(url, sha, idle, deadline):
     try:
         output, _ = process.communicate(request, timeout=max(.001, deadline - time.monotonic()))
         row = decode_worker(output) if process.returncode == 0 else None
-        return dict(decode_trace(output, started_ns, time.monotonic_ns()),
+        return dict(decode_trace(output, started_ns, time.monotonic_ns()), probe_id=probe_id,
                     **(row or {'reason': 'probe_error'}))
     except subprocess.TimeoutExpired as error:
         timed_out_ns = time.monotonic_ns()
@@ -319,9 +329,9 @@ def run_attempt(url, sha, idle, deadline):
         # Already observed HTTP errors remain non-retryable, even if the
         # worker was killed before emitting its final classification.
         if status is not None and status != 200:
-            return dict(trace, reason='http_status', retryable=False, timeout_source='parent_deadline')
+            return dict(trace, reason='http_status', retryable=False, timeout_source='parent_deadline', probe_id=probe_id)
         return dict(trace, reason='read_timeout' if status == 200 else 'connection_timeout',
-                    retryable=True, timeout_source='parent_deadline')
+                    retryable=True, timeout_source='parent_deadline', probe_id=probe_id)
     except OSError:
         return {'reason': 'probe_error'}
     finally:
@@ -359,7 +369,7 @@ def probe_health(url, sha=None, idle=False, total_timeout=4.0, max_attempts=2):
         reason = 'deadline_exhausted'
     return HealthResult(accepted, reason, row.get('http_status'), safe_commit(row.get('observed_commit')),
                         round(elapsed * 1000), len(reasons), tuple(reasons),
-                        row.get('last_phase'), row.get('phase_offsets_ms'), row.get('timeout_source'))
+                        row.get('last_phase'), row.get('phase_offsets_ms'), row.get('timeout_source'), row.get('probe_id'))
 
 
 if __name__ == '__main__':
@@ -367,7 +377,7 @@ if __name__ == '__main__':
         raise SystemExit(2)
     try:
         request = json.loads(sys.stdin.buffer.read(16385))
-        result = worker_probe(request['url'], request['sha'], request['idle'], request['timeout'])
+        result = worker_probe(request['url'], request['sha'], request['idle'], request['timeout'], request.get('probe_id'))
     except Exception:
         result = {'reason': 'probe_error'}
     print(json.dumps(result), flush=True)

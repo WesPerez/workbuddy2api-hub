@@ -416,6 +416,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
+- 健康探测以每次随机 ID 关联本机服务端读取/处理/发送阶段；固定容量、速率和 TTL 的异步脱敏摘要不恢复普通访问日志、不改变 busy/4秒门禁。未识别请求或丢失摘要仍为未知，不预设故障根因。/ Opaque per-attempt IDs correlate bounded, asynchronous server milestones; missing telemetry remains unknown and never relaxes health or idle gates.
+
 - 更新器健康诊断补充最后一次探测的进程启动、TCP、请求发送、响应头/正文阶段与截止来源；仍使用同一个 4 秒总预算、至多两次瞬时传输尝试，身份/结构/busy 失败不放行。阶段缺失不等于请求未发生，不推断 GIL 或账号健康。/ Updater health events now report bounded milestones of the last attempt and the timeout source, without changing the four-second deadline or fail-closed identity/idle gates. Missing milestones are unknown, not proof of an unissued request or a root cause.
 
 - 部署健康门禁增加脱敏原因、HTTP 状态、耗时和尝试次数；整个 GET 探测使用单一 4 秒预算，只对瞬时传输/超时有限重试。SHA、busy、ok=false、响应结构错误仍拒绝更新；此改动不预设反复失败的根因，也不调用真实账号或模型。

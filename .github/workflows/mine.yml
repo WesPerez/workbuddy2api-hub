@@ -23,6 +23,8 @@ jobs:
           python-version: '3.9'
       - name: Isolated health and deployment gate fixtures
         run: python3 -B tests/_test_updater_health_gate.py
+      - name: Bounded server health correlation fixtures
+        run: python3 -B tests/_test_health_probe_logging.py
       - name: Verify clean checkout
         run: python3 -B scripts/check_clean_checkout.py
   healthWindows:
@@ -38,6 +40,8 @@ jobs:
           python-version: '3.12'
       - name: Isolated health fixtures (Linux deployment gates run in verify)
         run: python -B tests/_test_updater_health_gate.py
+      - name: Bounded server health correlation fixtures
+        run: python -B tests/_test_health_probe_logging.py
       - name: Verify clean checkout
         run: python -B scripts/check_clean_checkout.py
   verify:
