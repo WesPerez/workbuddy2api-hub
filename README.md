@@ -135,7 +135,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 168 个套件：123 个 Python + 45 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 169 个套件：124 个 Python + 45 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -415,6 +415,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- 部署健康门禁增加脱敏原因、HTTP 状态、耗时和尝试次数；整个 GET 探测使用单一 4 秒预算，只对瞬时传输/超时有限重试。SHA、busy、ok=false、响应结构错误仍拒绝更新；此改动不预设反复失败的根因，也不调用真实账号或模型。
 
 - 受管出口的分块流式读取继续记录响应完成、空流和传输故障；三种流式接口在验证有效 `[DONE]` 后记录完成，无需等待连接 EOF。`[DONE]` 前的断流计入原租约的恢复阈值，不重放请求，客户端取消不计为出口故障。
 - 委托路由更新同时比较代理地址、凭据和完整守卫字段；仅修改代理配置也会校验路由版本、保存新配置并清除旧出口缓存。
