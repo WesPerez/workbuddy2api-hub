@@ -100,3 +100,30 @@ It never writes while holding a diagnostic lock; handler hooks never wait for te
 Blocking stdout can lose/delay evidence, not block HTTP or relax the four-second client decision.
 No extra diagnostic HTTP request, model request, credentials, URL/body or account identifiers are logged.
 Natural correlation is still required to locate the failure; no GIL/root-cause claim is made.
+
+## Handler-thread counters / 处理线程计数器
+
+Each accepted probe records the handler thread's native ID and a baseline at
+`headers_parsed`. Later handler stages may record cumulative non-negative
+deltas for `thread_time_ns()` and, on platforms that expose it,
+`getrusage(RUSAGE_THREAD)` minor/major faults and voluntary/involuntary context
+switches at seven fixed milestones. The observer only serializes the last
+handler samples, and a thread-ID change drops that stage's delta; a detected
+counter reset invalidates that counter for the rest of the probe. Values are bounded
+to allowlisted integer fields; sampler failure is lossy and keeps the existing
+wall-clock stages. These counters can show work attributed to the same handler
+thread near a timeout, but they cannot identify a backing file, prove page-in
+caused the delay, or establish GIL/resource pressure as the root cause. A
+pending/expired row cannot sample a handler that is currently blocked; a later
+handler milestone is needed for the interval counters. This change applies to
+future probes only and cannot reconstruct historical thread ownership.
+
+每个探测在 `headers_parsed` 记录处理线程 native ID 与基线。后续阶段可记录
+`thread_time_ns()` 以及支持平台上的 `RUSAGE_THREAD` 缺页和主动/被动上下文切换
+的累计非负差值。观察线程不会代替处理线程采样或完成记录；线程 ID 变化、计数器回退、
+不支持平台和采样异常都保留未知。字段有界且只允许白名单整数。这些数据可显示同一处理
+线程在超时附近的工作量，但不能指认后备文件、证明延迟由换页造成，也不能据此断定
+GIL 或资源压力是根因。采样限制为七个固定阶段；检测到计数器回退后，本次探测后续
+阶段不再记录该计数器。pending/expired 只序列化处理线程已记录的数据，无法在其阻塞中
+采样，必须等其进入后续阶段才能得到该区间计数。本改动只影响未来探测，不能补造历史
+事件的线程归属。

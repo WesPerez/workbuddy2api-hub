@@ -19,6 +19,7 @@ import io
 import socket
 import threading
 import time
+import builtins
 from email.message import Message
 from types import SimpleNamespace
 from unittest import mock
@@ -110,7 +111,8 @@ class HealthServerDiagnosticsTests(unittest.TestCase):
         rows = self.diag.collect()
         self.assertEqual([r['outcome'] for r in rows], ['complete'])
         self.assertLessEqual(set(rows[0]), {'state', 'probe_id', 'outcome', 'last_stage',
-                                         'server_elapsed_ms', 'stage_offsets_ms', 'response_status'})
+                                         'server_elapsed_ms', 'stage_offsets_ms', 'response_status',
+                                         'handler_native_id', 'thread_usage_delta'})
         self.assertLessEqual(set(rows[0]['stage_offsets_ms']), set(hd.STAGES))
         self.assertEqual(self.diag.collect(), [])
 
@@ -197,6 +199,96 @@ class HealthServerDiagnosticsTests(unittest.TestCase):
         self.assertEqual(row['last_stage'], 'headers_write')
         self.assertNotIn('secret', json.dumps(row))
 
+    def test_thread_counters_bind_to_handler_and_observer_never_samples(self):
+        sample = mock.Mock(side_effect=[
+            {'native_id': 81, 'counters': {'cpu_ns': 100, 'major_faults': 3}},
+            {'native_id': 81, 'counters': {'cpu_ns': 150, 'major_faults': 7}},
+        ])
+        self.diag.sample = sample
+        key = self.diag.begin(self.handler())
+        self.now += 5 * 10**9
+        self.diag.mark(key, 'health_enter')
+        row, = self.diag.collect()
+        self.assertEqual(row['handler_native_id'], 81)
+        self.assertEqual(row['thread_usage_delta'], {
+            'headers_parsed': {'cpu_ns': 0, 'major_faults': 0},
+            'health_enter': {'cpu_ns': 50, 'major_faults': 4}})
+        # Caller/observer identity must not be sampled by collect/finish.
+        self.diag.finish(key)
+        terminal, = self.diag.collect()
+        self.assertEqual(terminal['thread_usage_delta'], row['thread_usage_delta'])
+        self.assertEqual(sample.call_count, 2)
+
+    def test_cross_thread_and_reset_counters_are_not_fabricated(self):
+        self.diag.sample = mock.Mock(side_effect=[
+            {'native_id': 81, 'counters': {'cpu_ns': 100, 'major_faults': 3}},
+            {'native_id': 82, 'counters': {'cpu_ns': 999, 'major_faults': 10}},
+            {'native_id': 81, 'counters': {'cpu_ns': 200, 'major_faults': 1}},
+            {'native_id': 81, 'counters': {'cpu_ns': 250, 'major_faults': 9}},
+        ])
+        key = self.diag.begin(self.handler())
+        self.diag.mark(key, 'health_enter')
+        self.diag.mark(key, 'release_done')
+        self.diag.mark(key, 'busy_done')
+        self.diag.finish(key)
+        row, = self.diag.collect()
+        self.assertNotIn('health_enter', row['thread_usage_delta'])
+        self.assertEqual(row['thread_usage_delta']['release_done'], {'cpu_ns': 100})
+        self.assertEqual(row['thread_usage_delta']['busy_done'], {'cpu_ns': 150})
+
+    def test_usage_is_allowlisted_bounded_and_failure_keeps_existing_telemetry(self):
+        for bad in (None, [], {'native_id': True, 'counters': {}},
+                    {'native_id': -1, 'counters': {}}, {'native_id': 1, 'counters': []}):
+            self.diag.sample = lambda: bad
+            key = self.diag.begin(self.handler())
+            self.diag.finish(key)
+            row, = self.diag.collect()
+            self.assertNotIn('handler_native_id', row)
+            self.assertEqual(row['outcome'], 'complete')
+        self.diag.sample = mock.Mock(side_effect=OSError('private token=do-not-log'))
+        key = self.diag.begin(self.handler())
+        self.diag.mark(key, 'health_enter')
+        self.diag.finish(key)
+        row, = self.diag.collect()
+        self.assertEqual(row['last_stage'], 'health_enter')
+        self.assertNotIn('private', json.dumps(row))
+        self.diag.sample = lambda: {'native_id': 4, 'secret': 'token', 'counters': {
+            'cpu_ns': 5, 'major_faults': True, 'minor_faults': -1,
+            'voluntary_switches': 'private', 'involuntary_switches': 2**63, 'body': 'secret'}}
+        key = self.diag.begin(self.handler())
+        for stage in hd.STAGES:
+            self.diag.mark(key, stage)
+        self.diag.finish(key)
+        row, = self.diag.collect()
+        self.assertEqual(set(row['thread_usage_delta']), hd.USAGE_STAGES)
+        self.assertTrue(all(value == {'cpu_ns': 0} for value in row['thread_usage_delta'].values()))
+        self.assertNotIn('secret', json.dumps(row))
+
+    def test_unsupported_rusage_keeps_native_thread_and_cpu_without_proc_io(self):
+        with mock.patch.object(hd, 'resource', None), \
+             mock.patch.object(hd.threading, 'get_native_id', return_value=22), \
+             mock.patch.object(hd.time, 'thread_time_ns', return_value=456), \
+             mock.patch('builtins.open', side_effect=AssertionError('no diagnostic file I/O')):
+            self.assertEqual(hd.thread_sample(), {'native_id': 22, 'counters': {'cpu_ns': 456}})
+
+    def test_module_import_and_sampling_survive_missing_unix_resource(self):
+        source = wb_bridge.Path(hd.__file__).read_text()
+        code = compile(source, hd.__file__, 'exec')
+        original = builtins.__import__
+        def without_resource(name, *args, **kwargs):
+            if name == 'resource':
+                raise ImportError('synthetic Windows module absence')
+            return original(name, *args, **kwargs)
+        module = {'__name__': 'synthetic_health_unsupported', '__file__': hd.__file__}
+        with mock.patch.object(builtins, '__import__', side_effect=without_resource):
+            exec(code, module)
+        self.assertIsNone(module['resource'])
+        sample = module['thread_sample']()
+        self.assertEqual(sample['native_id'], threading.get_native_id())
+        self.assertEqual(set(sample['counters']), {'cpu_ns'})
+        self.assertGreaterEqual(sample['counters']['cpu_ns'], 0)
+        self.assertIsNone(module['DIAGNOSTICS'].observer)
+
     def test_health_callback_keeps_live_busy_without_release_io(self):
         proxy = SimpleNamespace(MAX_CONCURRENT_CHAT=4, _chat_slots=SimpleNamespace(_value=2),
                                 POOL=SimpleNamespace(accounts=[SimpleNamespace(
@@ -255,7 +347,9 @@ class HealthServerDiagnosticsTests(unittest.TestCase):
     def test_real_gateway_pending_health_read_then_complete_without_access_log(self):
         self.diag.clock = time.monotonic_ns
         entered, release = threading.Event(), threading.Event()
+        handler_ids = []
         def health(proxy, trace=None):
+            handler_ids.append(threading.get_native_id())
             if trace:
                 trace('release_read')
             entered.set()
@@ -285,6 +379,9 @@ class HealthServerDiagnosticsTests(unittest.TestCase):
                                      ('a' * 32, 'pending', 'release_read'))
                     self.assertIn('accepted', row['stage_offsets_ms'])
                     self.assertIn('handler_start', row['stage_offsets_ms'])
+                    self.assertEqual(row['handler_native_id'], handler_ids[0])
+                    self.assertNotEqual(row['handler_native_id'], threading.get_native_id())
+                    self.assertIn('health_enter', row['thread_usage_delta'])
                     release.set()
                     response = b''
                     while True:

@@ -420,6 +420,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 - 健康探测以每次随机 ID 关联本机服务端读取/处理/发送阶段；固定容量、速率和 TTL 的异步脱敏摘要不恢复普通访问日志、不改变 busy/4秒门禁。未识别请求或丢失摘要仍为未知，不预设故障根因。/ Opaque per-attempt IDs correlate bounded, asynchronous server milestones; missing telemetry remains unknown and never relaxes health or idle gates.
 
+- 关联摘要可在支持的平台记录处理线程的受限 native ID、线程 CPU 时间以及 `getrusage(RUSAGE_THREAD)` 的缺页和调度计数；仅保存从解析完成基线开始的非负阶段累计差值。线程变更、计数器回退、采样异常和不支持的平台保持缺失，不把换页、GIL 或任何单一根因写成结论。/ Where supported, correlation summaries may include a bounded handler native ID, thread CPU time, and `RUSAGE_THREAD` fault/scheduling counters as cumulative non-negative deltas from the parsed-header baseline. Thread changes, counter resets, sampler errors, and unsupported platforms remain unknown; this does not establish paging, GIL, or any single root cause.
+
 - 更新器健康诊断补充最后一次探测的进程启动、TCP、请求发送、响应头/正文阶段与截止来源；仍使用同一个 4 秒总预算、至多两次瞬时传输尝试，身份/结构/busy 失败不放行。阶段缺失不等于请求未发生，不推断 GIL 或账号健康。/ Updater health events now report bounded milestones of the last attempt and the timeout source, without changing the four-second deadline or fail-closed identity/idle gates. Missing milestones are unknown, not proof of an unissued request or a root cause.
 
 - 部署健康门禁增加脱敏原因、HTTP 状态、耗时和尝试次数；整个 GET 探测使用单一 4 秒预算，只对瞬时传输/超时有限重试。SHA、busy、ok=false、响应结构错误仍拒绝更新；此改动不预设反复失败的根因，也不调用真实账号或模型。
