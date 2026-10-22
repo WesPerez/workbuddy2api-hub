@@ -91,6 +91,11 @@ REQUIRED_FILES = (
     "DLLs/libffi-8.dll", "DLLs/libssl-3-x64.dll", "DLLs/libcrypto-3-x64.dll",
 )
 
+# Unix-only optional telemetry: the Windows package cannot contain resource.
+# Consumers listed here must catch ImportError and keep serving without it;
+# tests verify both the guarded import and the unavailable-module path.
+OPTIONAL_UNAVAILABLE_MODULES = {"resource": ("wb_health_diagnostics.py",)}
+
 # Absent from the shipped package, so they must stay absent here too.
 FORBIDDEN_PATHS = (
     "Scripts", "include", "libs", "tcl", "pythonw.exe",

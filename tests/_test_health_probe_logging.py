@@ -19,6 +19,7 @@ import io
 import socket
 import threading
 import time
+import builtins
 from email.message import Message
 from types import SimpleNamespace
 from unittest import mock
@@ -269,6 +270,24 @@ class HealthServerDiagnosticsTests(unittest.TestCase):
              mock.patch.object(hd.time, 'thread_time_ns', return_value=456), \
              mock.patch('builtins.open', side_effect=AssertionError('no diagnostic file I/O')):
             self.assertEqual(hd.thread_sample(), {'native_id': 22, 'counters': {'cpu_ns': 456}})
+
+    def test_module_import_and_sampling_survive_missing_unix_resource(self):
+        source = wb_bridge.Path(hd.__file__).read_text()
+        code = compile(source, hd.__file__, 'exec')
+        original = builtins.__import__
+        def without_resource(name, *args, **kwargs):
+            if name == 'resource':
+                raise ImportError('synthetic Windows module absence')
+            return original(name, *args, **kwargs)
+        module = {'__name__': 'synthetic_health_unsupported', '__file__': hd.__file__}
+        with mock.patch.object(builtins, '__import__', side_effect=without_resource):
+            exec(code, module)
+        self.assertIsNone(module['resource'])
+        sample = module['thread_sample']()
+        self.assertEqual(sample['native_id'], threading.get_native_id())
+        self.assertEqual(set(sample['counters']), {'cpu_ns'})
+        self.assertGreaterEqual(sample['counters']['cpu_ns'], 0)
+        self.assertIsNone(module['DIAGNOSTICS'].observer)
 
     def test_health_callback_keeps_live_busy_without_release_io(self):
         proxy = SimpleNamespace(MAX_CONCURRENT_CHAT=4, _chat_slots=SimpleNamespace(_value=2),
