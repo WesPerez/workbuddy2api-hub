@@ -12,6 +12,10 @@ import threading
 import time
 import weakref
 import functools
+try:
+    import resource
+except ImportError:  # Windows: native ID and thread CPU remain available.
+    resource = None
 
 HEADER = 'X-WB-Health-Probe'
 ID = re.compile(r'^[a-f0-9]{32}$')
@@ -20,6 +24,35 @@ STAGES = ('accepted', 'handler_start', 'request_line_done', 'headers_parsed',
           'daily_read', 'daily_done', 'health_exit', 'headers_write',
           'headers_written', 'body_write', 'body_flushed')
 OUTCOMES = frozenset({'pending', 'complete', 'handler_error', 'write_error', 'expired'})
+COUNTERS = ('cpu_ns', 'minor_faults', 'major_faults', 'voluntary_switches', 'involuntary_switches')
+USAGE_STAGES = frozenset({'headers_parsed', 'health_enter', 'release_done',
+                          'busy_done', 'daily_done', 'health_exit', 'body_flushed'})
+
+
+def thread_sample():
+    """Current thread only; no /proc, files, locks, stacks or exception text.
+
+    This is diagnostic evidence, not time attribution. Major faults do not
+    identify a backing file or prove that all elapsed time was page-in time.
+    """
+    result = {'counters': {}}
+    try:
+        result['native_id'] = threading.get_native_id()
+    except Exception:
+        return None
+    try:
+        result['counters']['cpu_ns'] = time.thread_time_ns()
+    except Exception:
+        pass
+    try:
+        if resource is not None and hasattr(resource, 'RUSAGE_THREAD'):
+            usage = resource.getrusage(resource.RUSAGE_THREAD)
+            for name, field in (('minor_faults', 'ru_minflt'), ('major_faults', 'ru_majflt'),
+                                ('voluntary_switches', 'ru_nvcsw'), ('involuntary_switches', 'ru_nivcsw')):
+                result['counters'][name] = getattr(usage, field)
+    except Exception:
+        pass
+    return result
 
 
 def lossy(method):
@@ -40,8 +73,9 @@ def loopback(address):
 
 
 class Diagnostics:
-    def __init__(self, emit=None, clock=time.monotonic_ns):
+    def __init__(self, emit=None, clock=time.monotonic_ns, sample=thread_sample):
         self.clock = clock
+        self.sample = sample
         # One bounded write, without holding TextIOWrapper's lock: a blocked
         # observer must not lock out unrelated threads using print/log.
         self.emit = emit or (lambda row: os.write(1, (json.dumps(row) + '\n').encode('utf-8')))
@@ -51,6 +85,49 @@ class Diagnostics:
         self.finished = deque(maxlen=128)
         self.starts = deque(maxlen=32)
         self.observer = None
+
+    def _sample(self):
+        # A broken/unsupported counter source must not lose the existing
+        # wall-clock diagnostics or become a health decision.
+        try:
+            value = self.sample()
+            if not isinstance(value, dict):
+                return None
+            tid = value.get('native_id')
+            counters = value.get('counters')
+            if type(tid) is not int or not 0 < tid < 2**63 or not isinstance(counters, dict):
+                return None
+            return {'native_id': tid, 'counters': {key: counters[key] for key in COUNTERS
+                    if type(counters.get(key)) is int and 0 <= counters[key] < 2**63}}
+        except Exception:
+            return None
+
+    def _usage(self, row, stage):
+        if stage not in USAGE_STAGES:
+            return
+        sample = self._sample()
+        if sample is None:
+            return
+        if stage == 'headers_parsed':
+            row['thread_baseline'] = sample
+            row['thread_previous'] = dict(sample['counters'])
+            row['thread_invalid'] = set()
+            row['thread_deltas'] = {stage: {key: 0 for key in sample['counters']}}
+            return
+        base = row.get('thread_baseline')
+        if base is None or sample['native_id'] != base['native_id']:
+            return  # Never subtract another thread's counters.
+        delta = {}
+        for key, value in base['counters'].items():
+            current = sample['counters'].get(key)
+            if current is None or key in row['thread_invalid']:
+                continue
+            if current < row['thread_previous'][key]:
+                row['thread_invalid'].add(key)
+                continue  # A reset stays unknown even if a later value rises.
+            row['thread_previous'][key] = current
+            delta[key] = current - value
+        row['thread_deltas'][stage] = delta  # Missing/reset counters stay unknown, not zero.
 
     @lossy
     def accepted(self, sock, address):
@@ -95,6 +172,7 @@ class Diagnostics:
             times['headers_parsed'] = now
             row = {'probe_id': values[0], 'start': min(times.values()), 'times': times,
                    'last_stage': 'headers_parsed', 'pending_sent': False}
+            self._usage(row, 'headers_parsed')
             self.active[values[0]] = row
             self.starts.append(now)
             return values[0]
@@ -115,6 +193,7 @@ class Diagnostics:
                 return
             row['times'][stage] = at
             row['last_stage'] = stage
+            self._usage(row, stage)
             if type(status) is int and 100 <= status <= 599:
                 row['response_status'] = status  # intended status, not client receipt
         finally:
@@ -139,6 +218,12 @@ class Diagnostics:
                                        for stage in STAGES if stage in row['times']}}
         if 'response_status' in row:
             fields['response_status'] = row['response_status']
+        if 'thread_baseline' in row:
+            fields['handler_native_id'] = row['thread_baseline']['native_id']
+            # Pending/expired snapshots only serialize the handler's last
+            # captured samples, never sample the observer thread as handler.
+            fields['thread_usage_delta'] = {stage: dict(row['thread_deltas'][stage])
+                                           for stage in STAGES if stage in row['thread_deltas']}
         return fields
 
     def collect(self):
