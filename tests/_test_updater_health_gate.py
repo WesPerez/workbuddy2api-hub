@@ -49,6 +49,8 @@ def server(responses):
                 return
             if row.get('header_delay'):
                 time.sleep(row['header_delay'])
+            if row.get('headers_gate') is not None:
+                row['headers_gate'].wait(timeout=5)
             body = row.get('body', json.dumps(GOOD).encode())
             try:
                 self.send_response(row.get('status', 200))
@@ -144,7 +146,7 @@ class HealthProbeTests(unittest.TestCase):
         # Windows can spend the remaining deadline waiting for the closed
         # socket instead of returning ECONNREFUSED immediately. Both are real
         # classified failures; acceptance and the two-attempt cap stay strict.
-        self.assertIn(result.reason, ('transport_failure', 'connection_timeout'))
+        self.assertIn(result.reason, ('transport_failure', 'connection_timeout', 'timeout_unknown'))
         self.assertIn(result.attempts, (1, 2))
         self.assertLess(result.elapsed_ms, 4500)
 
@@ -175,14 +177,19 @@ class HealthProbeTests(unittest.TestCase):
         for phase, reason in [('connect', 'connection_timeout'), ('read', 'read_timeout')]:
             opener = mock.Mock()
             if phase == 'connect':
-                opener.open.side_effect = hp.urllib.error.URLError(socket.timeout())
+                def connect_timeout(*args, **kwargs):
+                    trace.mark('connect_start')
+                    raise hp.urllib.error.URLError(socket.timeout())
+                opener.open.side_effect = connect_timeout
             else:
                 response = mock.MagicMock()
                 response.status = 200
                 response.read.side_effect = socket.timeout()
                 response.__enter__.return_value = response
                 opener.open.return_value = response
+            trace = hp.PhaseTrace()
             with self.subTest(reason=reason), \
+                 mock.patch.object(hp, 'PhaseTrace', return_value=trace), \
                  mock.patch.object(hp.urllib.request, 'build_opener', return_value=opener), \
                  contextlib.redirect_stdout(io.StringIO()):
                 result = hp.worker_probe('http://fixture', COMMIT, False, .8)
@@ -207,13 +214,62 @@ class HealthProbeTests(unittest.TestCase):
                     # Exact read-phase classification is asserted above and
                     # in the reader kill/reap fixture. Here either observed
                     # phase may exhaust the same total budget; never success.
-                    self.assertIn(result.reason, ('connection_timeout', 'read_timeout'))
+                    self.assertIn(result.reason, ('connection_timeout', 'read_timeout', 'timeout_unknown'))
+                    if result.last_phase in ('request_sent', 'headers_received'):
+                        self.assertEqual(result.reason, 'read_timeout')
                     self.assertEqual(result.attempts, 1)
                     self.assertIn(result.last_phase, hp.PHASES)
                     self.assertIn(result.timeout_source, hp.TIMEOUT_SOURCES)
                     # Small process creation/reaping/scheduler overhead is not
                     # treated as permission for another full timeout budget.
                     self.assertLess(elapsed, 1.5)
+
+    def test_real_socket_timeout_waiting_for_headers_is_a_read_timeout(self):
+        # Direct worker removes interpreter-start timing from this assertion.
+        # The real request/connect/getresponse hooks run against loopback only.
+        gate = threading.Event()
+        with server([{'headers_gate': gate}]) as (url, calls), \
+             contextlib.redirect_stdout(io.StringIO()) as stream:
+            try:
+                result = hp.worker_probe(url, COMMIT, False, .5)
+            finally:
+                gate.set()
+        phases = [json.loads(line)['phase'] for line in stream.getvalue().splitlines()]
+        self.assertIn('request_sent', phases)
+        self.assertNotIn('headers_received', phases)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result['reason'], 'read_timeout')
+        self.assertEqual(result['timeout_source'], 'socket_timeout')
+        self.assertTrue(result['retryable'])
+        self.assertIsNone(result.get('http_status'))
+
+    def test_worker_timeout_classification_uses_observed_milestones(self):
+        cases = [((), 'timeout_unknown'),
+                 (('connect_start',), 'connection_timeout'),
+                 (('connect_start', 'tcp_connected'), 'connection_timeout'),
+                 (('connect_start', 'tcp_connected', 'connection_ready'), 'timeout_unknown'),
+                 (('request_sent',), 'read_timeout'),
+                 (('headers_received',), 'read_timeout'),
+                 (('request_sent', 'headers_received', 'body_complete'), 'timeout_unknown')]
+        for phases, expected in cases:
+            for wrapped in (False, True):
+                trace = hp.PhaseTrace()
+                opener = mock.Mock()
+                def fail(*args, **kwargs):
+                    for phase in phases:
+                        trace.mark(phase)
+                    error = socket.timeout('fixture-secret-not-for-logs')
+                    raise hp.urllib.error.URLError(error) if wrapped else error
+                opener.open.side_effect = fail
+                with self.subTest(phases=phases, wrapped=wrapped), \
+                     mock.patch.object(hp, 'PhaseTrace', return_value=trace), \
+                     mock.patch.object(hp.urllib.request, 'build_opener', return_value=opener), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    row = hp.worker_probe('http://fixture?token=private', COMMIT, False, 4)
+                self.assertEqual(row['reason'], expected)
+                self.assertTrue(row['retryable'])
+                self.assertNotIn('secret', json.dumps(row))
+                self.assertNotIn('private', json.dumps(row))
 
     def test_slow_healthy_response_keeps_original_four_second_allowance(self):
         result, calls = self.probe([{'body_delay': 2.5}])
@@ -328,8 +384,35 @@ class HealthProbeTests(unittest.TestCase):
         with mock.patch.object(hp.subprocess, 'Popen', return_value=process):
             row = hp.run_attempt('http://fixture', COMMIT, False, time.monotonic() + 1)
         self.assertEqual((row['reason'], row['last_phase'], row['timeout_source']),
-                         ('connection_timeout', 'attempt_start', 'parent_deadline'))
+                         ('timeout_unknown', 'attempt_start', 'parent_deadline'))
         self.assertEqual(row['phase_offsets_ms'], {'attempt_start': 0})
+
+    def test_parent_timeout_classification_uses_only_timely_milestones(self):
+        for phase, expected in [('connect_start', 'connection_timeout'),
+                                ('tcp_connected', 'connection_timeout'),
+                                ('connection_ready', 'timeout_unknown'),
+                                ('request_sent', 'read_timeout'),
+                                ('body_complete', 'timeout_unknown')]:
+            for late in (False, True):
+                process = mock.Mock()
+                process.poll.side_effect = [None, -9]
+                partial = []
+                def communicate(*args, **kwargs):
+                    if not partial:
+                        at = time.monotonic_ns() + (10**12 if late else 0)
+                        partial.append(json.dumps({'phase': phase, 'at_ns': at}).encode())
+                        raise subprocess.TimeoutExpired('reader', 1)
+                    return partial[0], b''
+                process.communicate.side_effect = communicate
+                with self.subTest(phase=phase, late=late), \
+                     mock.patch.object(hp.subprocess, 'Popen', return_value=process):
+                    row = hp.run_attempt('http://fixture', COMMIT, False, time.monotonic() + 1)
+                self.assertEqual(row['reason'], 'timeout_unknown' if late else expected)
+                self.assertEqual(row['last_phase'], 'attempt_start' if late else phase)
+                self.assertTrue(row['retryable'])
+                self.assertIsNone(row.get('http_status'))
+                process.kill.assert_called_once()
+                process.wait.assert_called_once()
 
     def test_observed_http_failure_before_kill_never_becomes_retryable(self):
         process = mock.Mock()
@@ -517,11 +600,20 @@ class UpdaterGateTests(unittest.TestCase):
             self.assertEqual(data.joinpath('.draining').read_text(), 'update:' + COMMIT)
 
     def test_idle_failure_never_installs_or_stops_service(self):
-        for reason in ('busy', 'ok_false', 'read_timeout', 'schema_invalid'):
+        for reason in ('busy', 'ok_false', 'connection_timeout', 'read_timeout', 'timeout_unknown', 'schema_invalid'):
             with tempfile.TemporaryDirectory() as directory:
                 row, root, _ = self.run_main(directory, COMMIT, '2' * 40,
                                              hp.HealthResult(False, reason))
                 self.assertEqual(row['state'], 'waiting_for_idle')
+                self.assertEqual(root.joinpath('current').resolve().name, COMMIT)
+
+    def test_all_timeout_categories_reject_current_and_preserve_drain(self):
+        for reason in ('connection_timeout', 'read_timeout', 'timeout_unknown'):
+            with tempfile.TemporaryDirectory() as directory:
+                row, root, data = self.run_main(directory, COMMIT, COMMIT,
+                                               hp.HealthResult(False, reason), marker='update:' + COMMIT)
+                self.assertEqual((row['state'], row['reason']), ('unhealthy_current', reason))
+                self.assertEqual(data.joinpath('.draining').read_text(), 'update:' + COMMIT)
                 self.assertEqual(root.joinpath('current').resolve().name, COMMIT)
 
     def test_same_sha_success_keeps_current_semantics(self):
@@ -536,7 +628,7 @@ class UpdaterGateTests(unittest.TestCase):
                                         marker='external-owner')
             self.assertEqual(data.joinpath('.draining').read_text(), 'external-owner')
 
-    def transaction(self, directory, after_drain):
+    def transaction(self, directory, after_drain, failure_reason=None):
         selected = '2' * 40
         root, data, config = self.setup_runtime(directory)
         project = dict(update.PROJECT, id='fixture-health-' + Path(directory).name)
@@ -562,9 +654,9 @@ class UpdaterGateTests(unittest.TestCase):
                 root.joinpath('current').unlink()
                 root.joinpath('current').symlink_to(target)
             return mock.Mock(stdout=b'{}')
-        results = ([hp.HealthResult(True, 'ok')] + [hp.HealthResult(False, 'busy')] * 30
+        results = ([hp.HealthResult(True, 'ok')] + [hp.HealthResult(False, failure_reason or 'busy')] * 30
                    if not after_drain else [hp.HealthResult(True, 'ok')] * 2
-                   + [hp.HealthResult(False, 'commit_mismatch')] * 30)
+                   + [hp.HealthResult(False, failure_reason or 'commit_mismatch')] * 30)
         gh = mock.Mock()
         gh.file.side_effect = artifact
         stream = io.StringIO()
@@ -617,6 +709,24 @@ class UpdaterGateTests(unittest.TestCase):
                               ['systemctl', 'stop', 'fixture.service'], ['systemctl', 'start', 'fixture.service']])
             self.assertFalse(Path(directory).joinpath('state', 'last-success.json').exists())
             self.assertEqual(sum(json.loads(line)['state'] == 'new_service_health' for line in logs.splitlines()), 30)
+
+    def test_timeout_reasons_preserve_bounded_drain_and_rollback(self):
+        for reason in ('connection_timeout', 'read_timeout', 'timeout_unknown'):
+            for after_drain in (False, True):
+                with self.subTest(reason=reason, after_drain=after_drain), \
+                     tempfile.TemporaryDirectory() as directory:
+                    root, data, commands, logs, error = self.transaction(directory, after_drain, reason)
+                    self.assertEqual(root.joinpath('current').resolve().name, COMMIT)
+                    self.assertFalse(data.joinpath('.draining').exists())
+                    events = [json.loads(line) for line in logs.splitlines()]
+                    stage = 'new_service_health' if after_drain else 'draining_health'
+                    self.assertEqual(sum(row['state'] == stage and row['reason'] == reason for row in events), 30)
+                    if after_drain:
+                        self.assertIsInstance(error, ValueError)
+                        self.assertFalse(Path(directory).joinpath('state', 'last-success.json').exists())
+                    else:
+                        self.assertIsNone(error)
+                        self.assertFalse(any(args[0] == 'systemctl' or '--activate' in args for args in commands))
 
 
 if __name__ == '__main__':

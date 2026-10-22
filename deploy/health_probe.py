@@ -28,7 +28,7 @@ import urllib.request
 
 SHA = re.compile(r'^[a-f0-9]{40}$')
 MAX_RESPONSE = 65536
-REASONS = frozenset({'ok', 'connection_timeout', 'read_timeout', 'transport_failure',
+REASONS = frozenset({'ok', 'connection_timeout', 'read_timeout', 'timeout_unknown', 'transport_failure',
                      'http_status', 'response_too_large', 'json_invalid', 'schema_invalid',
                      'ok_false', 'commit_mismatch', 'busy', 'deadline_exhausted', 'probe_error'})
 TRANSIENT_ERRNOS = frozenset({errno.ECONNREFUSED, errno.ECONNRESET, errno.ECONNABORTED,
@@ -237,8 +237,21 @@ def transient(error):
                                           or getattr(error, 'winerror', None) in TRANSIENT_WINERRORS)
 
 
+def timeout_reason(phases):
+    # request() returned only after the request was sent to the local socket.
+    # Waiting for response headers is already a read, not a TCP connection.
+    # Missing telemetry is unknown; connection_ready alone could be a blocked
+    # send, and startup/pipe/scheduler time is not evidence of connection I/O.
+    if 'body_complete' in phases:
+        return 'timeout_unknown'  # Payload parsing/worker exit is not a socket read.
+    if any(phase in phases for phase in ('request_sent', 'headers_received')):
+        return 'read_timeout'
+    if 'connection_ready' not in phases and any(phase in phases for phase in ('connect_start', 'tcp_connected')):
+        return 'connection_timeout'
+    return 'timeout_unknown'
+
+
 def worker_probe(url, sha, idle, timeout, probe_id=None):
-    phase = 'connect'
     status = None
     trace = PhaseTrace()
     trace.mark('worker_ready')
@@ -254,7 +267,6 @@ def worker_probe(url, sha, idle, timeout, probe_id=None):
             trace.mark('headers_received', status)
             if status != 200:
                 return {'reason': 'http_status', 'http_status': status}
-            phase = 'read'
             body = response.read(MAX_RESPONSE + 1)
             trace.mark('body_complete')
             result = classify_payload(body, sha, idle)
@@ -265,10 +277,10 @@ def worker_probe(url, sha, idle, timeout, probe_id=None):
     except urllib.error.URLError as error:
         cause = error.reason
         if isinstance(cause, (TimeoutError, socket.timeout)):
-            return {'reason': 'connection_timeout', 'retryable': True, 'timeout_source': 'socket_timeout'}
+            return {'reason': timeout_reason(trace.seen), 'retryable': True, 'timeout_source': 'socket_timeout'}
         return {'reason': 'transport_failure', 'retryable': transient(cause)}
     except (TimeoutError, socket.timeout):
-        return {'reason': 'read_timeout' if phase == 'read' else 'connection_timeout',
+        return {'reason': timeout_reason(trace.seen),
                 'http_status': status, 'retryable': True, 'timeout_source': 'socket_timeout'}
     except (OSError, http.client.HTTPException) as error:
         return {'reason': 'transport_failure', 'http_status': status, 'retryable': transient(error)}
@@ -330,7 +342,7 @@ def run_attempt(url, sha, idle, deadline):
         # worker was killed before emitting its final classification.
         if status is not None and status != 200:
             return dict(trace, reason='http_status', retryable=False, timeout_source='parent_deadline', probe_id=probe_id)
-        return dict(trace, reason='read_timeout' if status == 200 else 'connection_timeout',
+        return dict(trace, reason=timeout_reason(trace['phase_offsets_ms']),
                     retryable=True, timeout_source='parent_deadline', probe_id=probe_id)
     except OSError:
         return {'reason': 'probe_error'}

@@ -416,6 +416,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
+- 健康探测按已观察阶段修正超时分类：请求已发送后等待响应头属于 `read_timeout`；启动/发送/正文后阶段不明时为 `timeout_unknown`，不误报 TCP 故障。4 秒预算、失败拒绝及有限重试均不变。/ Health timeout classification now treats post-send header waits as reads and preserves unknown stages without changing deadlines or deployment gates.
+
 - 健康入口在进程导入时固定已安装 release 的 SHA，避免每次探测重复磁盘读取；缺失/非法身份仍拒绝精确 SHA 门禁，busy 仍实时读取。不放宽超时，也不声称消除主机换页或全部延迟。/ Health pins the installed release identity at import, removing repeated metadata I/O while preserving live busy and fail-closed SHA/deadline checks; this does not claim to resolve all host pressure.
 
 - 健康探测以每次随机 ID 关联本机服务端读取/处理/发送阶段；固定容量、速率和 TTL 的异步脱敏摘要不恢复普通访问日志、不改变 busy/4秒门禁。未识别请求或丢失摘要仍为未知，不预设故障根因。/ Opaque per-attempt IDs correlate bounded, asynchronous server milestones; missing telemetry remains unknown and never relaxes health or idle gates.

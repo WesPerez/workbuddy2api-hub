@@ -22,9 +22,9 @@ Existing timer events gain only `last_phase`, `phase_offsets_ms`, and optional `
 | `headers_received` | stdlib getresponse 完成状态行/headers；只留受限 status。Status/headers received, status integer only. |
 | `body_complete` | 有界 read 返回；JSON/结构/身份判断可能尚未完成。Bounded read returned, before JSON/identity checks. |
 
-`timeout_source=parent_deadline` 是父进程总截止，`socket_timeout` 是实际 socket 路径超时。旧 `connection_timeout` 仍是响应头之前的宽泛兼容类别，**不等于 TCP 故障**；新的阶段才区分已观察边界。`headers_received` 后的 200 超时仍拒绝，已观察非 200 保持 HTTP 失败且不重试。
+`timeout_source=parent_deadline` 是父进程总截止，`socket_timeout` 是实际 socket 路径超时。分类取已有阶段：已观察 `request_sent` / `headers_received` 后等待响应为 `read_timeout`（即使还没有 HTTP status）；仅在最后观察到连接进行中、尚未观察完成时为 `connection_timeout`，包括 TLS 阶段，不是 TCP 根因结论。启动前/阶段缺失、连接已就绪但未观察发送完成、正文已读完后的截止为 `timeout_unknown`，不把调度、写入或解析耗时误称连接失败。旧版本的 `connection_timeout` 是响应头前宽泛类别，历史记录不回填为新分类。所有超时仍拒绝；`retryable` 只保留原有限重试策略，父总预算耗尽后不会再尝试。已观察非 200 仍是不可重试 HTTP 失败，200 headers 不能代替成功负载。
 
-`parent_deadline` identifies the owner's overall cutoff; `socket_timeout` identifies the socket path. The compatible broad `connection_timeout` reason is **not a TCP diagnosis**. Observed non-200 status is never retried; a 200 header alone cannot pass the gate.
+Timeout reasons use existing milestones: `request_sent` or `headers_received` means a response-read timeout even without a status. An observed in-progress connection is `connection_timeout` (including TLS), not a TCP root-cause claim. Missing/startup evidence, connection-ready without a completed send, and post-body cutoff are `timeout_unknown`. Historical broad pre-header categories are not rewritten. All timeouts remain fail-closed with the unchanged transient retry cap and total deadline; observed non-200 remains non-retryable.
 
 worker 使用私有 pipe 发送固定阶段与系统单调时钟，最多固定九个 marker，无 URL、header、body、异常文本、账号、Cookie、token 或环境值。父进程拒绝超长、未知/倒序/未来/异常类型的 marker；在 kill/reap 后只采纳不晚于超时观察的阶段。缺失事件仍是未知，不能证明请求未到达或排除服务端阻塞。HTTPS 默认验证、禁代理环境、禁重定向均保留。
 
