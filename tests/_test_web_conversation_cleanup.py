@@ -31,6 +31,12 @@ UID = "c90a4e93-edad-42fe-aa3a-133fb27cf6b6"
 CREATE_URL = "https://www.workbuddy.ai/console/as/conversations/"
 
 
+# Exercise dormant upstream behavior with fake accounts/transports only.
+# Production policy remains False; tests/_test_bridge.py pins that boundary.
+import wb_bridge
+wb_bridge.daily_enabled = lambda: True
+
+
 class Response(object):
     def __init__(self, payload):
         self.payload = payload

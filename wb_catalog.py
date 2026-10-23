@@ -7,7 +7,7 @@ CLI-facing model endpoint returns a narrower list that omits models
 such as deepseek-v4.1-flash and gpt-6-astra.
 
 Live sources take precedence: whatever the app cache or the API reports
-is overlaid on top of this catalog by merge_catalog().
+owns membership; this snapshot only fills metadata or serves an offline fallback.
 
 Stored as JSON text and parsed at import time so the literals stay
 valid JSON (true/false/null) instead of needing Python spellings.

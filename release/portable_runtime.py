@@ -74,6 +74,7 @@ REQUIRED_FILES = (
     "vcruntime140.dll", "vcruntime140_1.dll", "LICENSE.txt",
     "Lib/os.py", "Lib/io.py", "Lib/ssl.py", "Lib/hashlib.py", "Lib/hmac.py", "Lib/stat.py",
     "Lib/platform.py", "Lib/socket.py",
+    "Lib/copy.py", "Lib/functools.py", "Lib/weakref.py",
     "Lib/json/__init__.py", "Lib/urllib/__init__.py", "Lib/urllib/request.py",
     "Lib/uuid.py", "Lib/secrets.py",
     "Lib/argparse.py", "Lib/base64.py", "Lib/bisect.py", "Lib/calendar.py", "Lib/datetime.py",
@@ -81,12 +82,13 @@ REQUIRED_FILES = (
     "Lib/ipaddress.py", "Lib/queue.py", "Lib/shutil.py", "Lib/random.py",
     "Lib/subprocess.py", "Lib/threading.py", "Lib/sqlite3/__init__.py",
     "Lib/posixpath.py", "Lib/signal.py", "Lib/zipfile/__init__.py",
+    "Lib/pathlib.py",
     "Lib/html/__init__.py", "Lib/http/__init__.py", "Lib/http/client.py",
     "Lib/concurrent/__init__.py", "Lib/concurrent/futures/__init__.py",
     "Lib/ctypes/__init__.py", "Lib/collections/__init__.py", "Lib/re/__init__.py",
     "DLLs/_socket.pyd", "DLLs/_ssl.pyd", "DLLs/_hashlib.pyd", "DLLs/_ctypes.pyd",
     "DLLs/select.pyd", "DLLs/unicodedata.pyd", "DLLs/_uuid.pyd", "DLLs/_decimal.pyd",
-    "DLLs/_sqlite3.pyd",
+    "DLLs/_sqlite3.pyd", "DLLs/sqlite3.dll",
     "DLLs/libffi-8.dll", "DLLs/libssl-3-x64.dll", "DLLs/libcrypto-3-x64.dll",
 )
 

@@ -15,6 +15,7 @@ import random
 import wb_tasks
 import wb_quota_scan
 import wb_settings
+import wb_bridge
 from wb_tasks import do_cat_travel
 
 
@@ -149,9 +150,11 @@ class Scheduler:
 
     def _run_loop(self):
         # 启动后先休眠 10 秒等待主服务就绪，然后执行初次检查
-        time.sleep(10)
+        if self._stop_event.wait(10):
+            return
         try:
-            self._execute_cycle("启动初次初始化巡检")
+            if self.enabled and not wb_bridge.draining():
+                self._execute_cycle("启动初次初始化巡检")
         except Exception as exc:
             self.log(f"初次巡检异常: {exc}")
         # 进程停过一段时间的话，重置时刻可能已经过去：启动就补一次窗口探针，
@@ -198,7 +201,7 @@ class Scheduler:
         一次探针最长可能等上游几十秒，跑在巡检循环里会把整点排程的节奏带偏；
         wb_window_probe 自带防重入锁，重叠启动是无害的。
         """
-        if self._probe_thread and self._probe_thread.is_alive():
+        if wb_bridge.draining() or (self._probe_thread and self._probe_thread.is_alive()):
             return
         self._probe_thread = threading.Thread(target=self._probe_worker, daemon=True)
         self._probe_thread.start()
@@ -216,7 +219,7 @@ class Scheduler:
         一次查询要等上游几十秒，塞进巡检循环会把整点排程的节奏带偏；
         wb_quota_scan 自带防重入锁，重叠启动是无害的。
         """
-        if self._scan_thread and self._scan_thread.is_alive():
+        if wb_bridge.draining() or (self._scan_thread and self._scan_thread.is_alive()):
             return
         self._scan_thread = threading.Thread(target=self._scan_worker, daemon=True)
         self._scan_thread.start()
@@ -334,6 +337,8 @@ class Scheduler:
 
     def _execute_cycle(self, trigger_reason="周期巡检", force=False,
                        daily_chat_only=False):
+        if not self.enabled or wb_bridge.draining():
+            return
         if not self._run_lock.acquire(blocking=False):
             self.log(f"跳过本次巡检 ({trigger_reason})：上一轮仍在执行")
             return
@@ -370,8 +375,10 @@ class Scheduler:
                           or (not self.daily_chat_times and run_checkin))
 
         for idx, acc in enumerate(list(self.pool.accounts)):
+            if wb_bridge.draining():
+                continue
             if idx > 0:
-                # 账号间随机错峰防并发风控（2~5秒浮动延时，issue #394）
+                # Keep upstream's staggered scheduling on managed accounts too.
                 time.sleep(random.uniform(2.0, 5.0))
             uid8 = acc.uid[:8] if acc.uid else "?"
             # 上游账号级风控限制（403 / code 11140）中的账号一律跳过：无人值守
@@ -457,10 +464,10 @@ class Scheduler:
                         self.log(f"🌙 {line}")
                     time.sleep(1.0)
 
-            # 3. 如果是国际版账号，检查每日活跃对话 (送 30/50 积分福利)
-            if acc.realm == "intl" and task_active and run_daily_chat:
-                if acc.can_daily_chat():
-                    daily_chat_targets.append(acc)
+            # The production policy remains closed, including old opt-ins.
+            if (wb_bridge.daily_enabled() and acc.realm == "intl"
+                    and task_active and run_daily_chat and acc.can_daily_chat()):
+                daily_chat_targets.append(acc)
 
         if daily_chat_targets:
             daily_chat_count = self._run_daily_chat_batch(daily_chat_targets)

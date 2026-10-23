@@ -335,8 +335,6 @@ def _probe(account, model):
       * detail        失败原因，只用于日志与状态展示。
     """
     import wb_proxy  # 函数内导入：wb_proxy 顶层会拉起调度器，避免循环依赖
-    url = account.chat_base_url() + wb_proxy.CHAT_PATH
-    headers = account.headers(purpose="chat")
     body = {
         "model": model,
         "messages": [{"role": "user", "content": PROBE_PROMPT}],
@@ -349,9 +347,12 @@ def _probe(account, model):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     except Exception as exc:
         return False, None, "构造请求失败: %s" % exc
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with wb_accounts.urlopen(req, timeout=PROBE_TIMEOUT, proxy=account.proxy) as resp:
+        url, headers, request_proxy = account.capability_snapshot(
+            "chat", wb_proxy.CHAT_PATH,
+            header_factory=lambda: account.headers(purpose="chat", model=model))
+        req = wb_accounts.wb_sources.request(url, data=data, headers=headers, method="POST")
+        with wb_accounts.urlopen(req, timeout=PROBE_TIMEOUT, proxy=request_proxy) as resp:
             resp.read()
         return True, None, ""
     except urllib.error.HTTPError as exc:

@@ -27,6 +27,12 @@ def at(hour, minute, day=20):
     return time.struct_time((2026, 10, day, hour, minute, 0, 0, 0, -1))
 
 
+# Exercise dormant upstream behavior with fake accounts/transports only.
+# Production policy remains False; tests/_test_bridge.py pins that boundary.
+import wb_bridge
+wb_bridge.daily_enabled = lambda: True
+
+
 class TimeParsingTests(unittest.TestCase):
     def test_hh_mm_is_normalized_sorted_and_deduped(self):
         self.assertEqual(
