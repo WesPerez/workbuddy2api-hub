@@ -513,6 +513,14 @@ def dispatch(handler, proxy):
         handler.end_headers()
         handler.wfile.write(body)
         return True
+    if path == "/healthz" and handler.command == "GET":
+        import wb_health_diagnostics as diagnostics
+        diagnostics.mark(handler, 'health_enter')
+        result = (health(proxy, lambda stage: diagnostics.mark(handler, stage))
+                  if getattr(handler, '_health_probe_id', None) else health(proxy))
+        diagnostics.mark(handler, 'health_exit')
+        handler._json(200, result)
+        return True
     if not path.startswith("/bridge/v1/"):
         return False
     token_file = Path(os.environ.get("WB_BRIDGE_TOKEN_FILE", str(data_root() / "bridge.token")))

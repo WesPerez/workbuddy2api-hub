@@ -1,0 +1,78 @@
+name: Verify and Package Mine
+on:
+  push:
+    branches: [mine]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CI_FALLBACK_CONTRACT: '1'
+  CI_FALLBACK_RELEASE_ARTIFACTS: '1'
+concurrency:
+  group: mine-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  health39:
+    name: Health gate Ubuntu Python 3.9
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Isolated health and deployment gate fixtures
+        run: python3 -B tests/_test_updater_health_gate.py
+      - name: Bounded server health correlation fixtures
+        run: python3 -B tests/_test_health_probe_logging.py
+      - name: Verify clean checkout
+        run: python3 -B scripts/check_clean_checkout.py
+  healthWindows:
+    name: Health gate Windows Python 3.12
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Isolated health fixtures (Linux deployment gates run in verify)
+        run: python -B tests/_test_updater_health_gate.py
+      - name: Bounded server health correlation fixtures
+        run: python -B tests/_test_health_probe_logging.py
+      - name: Verify clean checkout
+        run: python -B scripts/check_clean_checkout.py
+  verify:
+    needs: [health39, healthWindows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Gateway, ownership, proxy and UI regressions
+        run: python3 -B tests/run_all.py --jobs 4 --logs suite-logs
+      - name: Verify clean checkout
+        run: python3 -B scripts/check_clean_checkout.py
+      - name: Package verified runtime
+        run: python3 -B scripts/package-runtime.py
+      - name: Preserve verified runtime
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 -B scripts/ci_release_artifacts.py --name production-runtime --path "$RUNNER_TEMP/workbuddy-hub-$GITHUB_SHA.tar.gz" --path "$RUNNER_TEMP/SHA256SUMS"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: suite-logs
+          path: suite-logs
