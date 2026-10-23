@@ -83,3 +83,4 @@ wb_webtools.py
 wb_window_probe.py
 
 wb_bridge.py
+favicon.svg

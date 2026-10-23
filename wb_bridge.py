@@ -503,6 +503,16 @@ def health(proxy, trace=None):
 
 def dispatch(handler, proxy):
     path = handler.path.split("?")[0]
+    if path in {"/favicon.svg", "/favicon.ico"} and handler.command == "GET":
+        body = Path(__file__).with_name("favicon.svg").read_bytes()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "image/svg+xml")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.send_header("X-Content-Type-Options", "nosniff")
+        handler.send_header("Cache-Control", "public, max-age=3600")
+        handler.end_headers()
+        handler.wfile.write(body)
+        return True
     if not path.startswith("/bridge/v1/"):
         return False
     token_file = Path(os.environ.get("WB_BRIDGE_TOKEN_FILE", str(data_root() / "bridge.token")))
