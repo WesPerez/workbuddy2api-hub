@@ -17,7 +17,7 @@
 - **模型目录对齐官方桌面端**：剔除补全通道与专线变体，能力与规格按桌面端宣告，上游新模型无需发版即进 `/v1/models`；
 - **设备指纹隔离 (`derive_id`)**：以账号 UID 稳定派生机器码与会话标识，同一账号不漂移、不同账号互不关联；
 - **账号接入**：看板点链接走浏览器 OAuth；Windows 上还能直接从运行中的桌面客户端导入（加密 token 就地解密），macOS / Linux 可手动粘贴解码密钥后导入；
-- **每日自动化**：国内版签到 / 成长与积分任务 / 猫猫旅行；国际版每日活跃打卡（真跑完网页会话）；后台调度器按 09:00 & 21:00、22:00、01:00 排程；
+- **每日自动化**：国内版签到 / 成长与积分任务 / 猫猫旅行；国际版只同步积分，自动活跃任务已停用；后台调度器按 09:00 & 21:00、22:00、01:00 排程；
 - **限额护栏**：保留积分 · 每日 Token · 每日积分 · 按模型 Token 四条账号级护栏，单账号独立计数，本地 0 点解封（默认全部关闭）；
 - **OpenRouter 价估算**：把 token 折算成等价花费（人民币 / 美元可切），逐条请求可悬停查看定价来源；
 - **多 Key 与出口绑定**：每个 Key 可固定走国际版或国内版、可限定模型，用量按 Key 归属；
@@ -59,7 +59,7 @@
 「设置」页可管理多个 Key，每个 Key 独立出口——不同客户端各用各的 Key，国内外流量互不干扰：
 
 - **生成 / 绑定**：填名称点「生成随机 Key」；可固定走 🌐 国际版或 🇨🇳 国内版，不绑定则跟随看板顶部的全局出口开关；
-- **模型限制**：可填允许的模型（如 `deepseek*`、`gpt-6-astra`，支持 `*`，逗号分隔），留空不限；不在列表里的请求本机直接返回 400，不送达上游、不消耗额度；
+- **模型限制**：可填允许的模型（如 `deepseek*`、`gpt-6-sol`，支持 `*`，逗号分隔），留空不限；不在列表里的请求本机直接返回 400，不送达上游、不消耗额度；
 - **区域自检**：Key 绑定的出口与模型不匹配时（如国际版 Key 调国内独占的 `deepseek-v4-pro`）直接返回可读 400，而不是上游晦涩的 WAF 报错；
 - **启停 / 删除**：可单独启停；删除后密钥立即失效，条目以只读形式留在「设置」页的「已删除」折叠区，历史用量仍显示它的名字；
 - **用量归因**：「数据看板」页按 Key 列出请求数、Token、缓存命中、积分与模型分布，口径与账号表一致；
@@ -167,10 +167,12 @@ python tests/run_all.py realm      # 只跑名字里含 realm 的
 
 对官方本地配置清单（50+ 底层模型）做清洗：剔除行内补全专用模型（`codewise-*`、`completion-gf`、`hunyuan-3b/7b` 等）与多云专线变体（`*-volc`、`*-lkeap` 等），严格对齐官方 Windows 桌面端，并宣告每个模型的上下文窗口、单次最大输出、视觉支持、工具调用与推理档位。
 
-- **🌐 国际版（17 个）**：`hy4-preview-f`、`hy3`、`deepseek-v4.1-flash`、`gpt-6-astra`、`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`、`gpt-5.5`、`gpt-5.4`、`grok-4.7`、`gemini-3.5-flash`、`glm-5.3-flash`、`glm-5.3`、`glm-5.2`、`kimi-k3`、`kimi-k2.6`、`kimi-k2.8-preview`
+- **🌐 国际版**：以当前 `/v1/models` 返回的区域目录为准，面板同时展示目录来源、更新时间和逐模型验证状态。内置快照只用于目录不可用时恢复；目录声明不等于每个账号实测通过，实际调用仍受账号权限、额度及上游状态影响。
 - **🇨🇳 国内版（14 个）**：`hy4-preview-f`、`hy3`、`deepseek-v4.1-flash`、`deepseek-v4-pro`、`glm-5.3`、`glm-5.3-flash`、`glm-5.2`、`glm-5.1`、`glm-5v-turbo`、`minimax-m3`、`kimi-k3-1`、`kimi-k2.8-preview`、`kimi-k2.7`、`kimi-k2.6`
 
-清单与上游 `GET /v3/config` 的 `agents[cli].models` 保持同步（接口不可用时依次回落到桌面端缓存文件、内置快照）；过滤规则：去掉 5 个档位别名与 `auto`、去掉 `-sg` / `-x` 变体、同名的只留 0.00 倍率那一档。上游新上架的模型无需发版即出现在 `/v1/models`。
+清单以其区域上游 `GET /v3/config` 的 `agents[cli].models` 为准，按需刷新、缓存 5 分钟；响应及面板显示目录来源、抓取时间和是否过期。上游失败时使用最近成功目录，再回落桌面端缓存或内置快照，历史快照不能恢复已经下架的模型。过滤档位别名、`auto`、`-sg` / `-x` 变体；仅在当前区域目录同时列出免费同名变体时才隐藏付费变体。上游新模型无需发版即进入 `/v1/models`，未公布倍率显示「未提供」，不按零费用处理。
+
+模型可用性另外按真实请求记录：`data[].availability` 区分近 24 小时成功和未验证；上游明确拒绝模型或返回空响应时列入 `excluded`，保留原因和验证时间。各账号、各区域分别记录，其他启用账号的近期成功不会被单个账号失败覆盖。失败状态不会因计时到期自动恢复，指定模型的正常请求或面板「复测」成功后才恢复；复测会发送一次真实模型请求。网络超时本身不证明模型已下架。面板在前台每 30 秒刷新，历史零用量但没有输出证据的记录只标为待验证。Chat、Responses、Messages 的流式和非流式空响应均记录为失败，避免被计作成功的零 Token 请求。
 
 > 同名模型（如 `deepseek-v4.1-flash`）**暂未实现跨国内 / 国际账号的混合轮询**：两个区域作为独立出口分别配置与调度，请求只走当前所选网关。这是出站指纹对齐与账号防风控的取舍，待长期实测确认稳定后再补。
 
@@ -189,10 +191,10 @@ python tests/run_all.py realm      # 只跑名字里含 realm 的
 
 常驻后台，按固定整点执行自动化运维排程：
 
-- **每日 09:00 & 21:00**：国内版账号自动签到、对话活跃上报（点亮连登）与猫猫旅行闭环；国际版账号执行每日活跃打卡（领官方每日 30/50 积分福利）；
+- **每日 09:00 & 21:00**：国内版账号自动签到、对话活跃上报（点亮连登）与猫猫旅行闭环；国际版奖励需在官方客户端有效对话，通常次日自动到账，网页/API 调用不计入；
 - **每日 22:00**：集中扫描全库账号，Token 剩余寿命不足 2 小时自动调用 Refresh Token 保活；
 - **每日 01:00**：深夜时段执行夜猫子任务；
-- 看板顶部另有「立即巡检保活」与「每日活跃打卡 (国际版)」可随时手动触发。
+- 看板顶部另有「立即巡检保活」可随时手动触发。
 
 ### 5. 限额护栏（设置 → 账号限额）
 
@@ -322,7 +324,7 @@ python wb_agents.py restore --client codex                 # 随时字节级还�
 
 - 列：时间（发放）/ 账号 / 区域 / 名称 / **来源** / 积分 / 剩余 / 到期 / 状态；
 - 状态按「过期 > 用完 > 在扣减 > 可用」归类：**生效中**（上游标了 `in_usage`，当前正从它扣减）、**可用**、**已用完**、**已过期**；`no_expiry` 的包显示「不过期」；
-- **来源**：上游自带的发放原因原样显示（如「Buddy 加油站签到」「成长计划奖励」「官方活动发放」）；国际版的 Bonus Pack 30/50 没有原因字段，按官方规则推断为「每日活跃奖励」（悬停里注明这是推断）。我们自己的**签到 / 每日活跃**记录也会按时间关联上去（取发放前 2 小时内最近的一次尝试，带成功 / 失败），悬停即可对上「本机动作：每日签到 10-10 00:07 成功」——一次发放到底由哪次动作带来，一眼可见；
+- **来源**：上游自带的发放原因原样显示（如「Buddy 加油站签到」「成长计划奖励」「官方活动发放」）；国际版的 Bonus Pack 30/50 没有原因字段，按官方规则推断为「每日活跃奖励」（悬停里注明这是推断）。我们自己的**签到 / 每日活跃**记录也会按时间关联上去（取发放前 2 小时内最近的一次尝试，带成功 / 失败），悬停即可对上「本机动作：每日签到 10-10 00:07 成功」——时间关联不代表因果，也不证明 API 调用获得了官方活动资格；
 - 摘要行给出笔数、合计面额、合计剩余与**快照时刻**。接口 `GET /accounts/credits/grants` 只读内存里的积分快照、**不发上游请求**——数字的新鲜度取决于最近一次「一键刷新积分」（签到与每日活跃打卡也会顺带刷新它），所以要看最新的包先点账号页那个按钮。
 
 ### 11. 单请求体体积限制（`WB_MAX_PAYLOAD_BYTES`）
@@ -394,7 +396,7 @@ python wb_agents.py restore --client codex                 # 随时字节级还�
 
 - **API 接口地址 (Base URL)**：`http://127.0.0.1:8788/v1`（局域网为 `http://<局域网IP>:8788/v1`）
 - **API Key**：本机单机模式（未配置 Key 且未开 LAN）可留空或填任意字符；已在看板配置 Key 或 LAN 模式，请用看板「设置」页里绑好出口的 Key；
-- **模型名称**：填 `/v1/models` 里列出的任意官方对齐模型 ID（如 `deepseek-v4.1-flash`、`gpt-6-astra`、`glm-5.3`）。
+- **模型名称**：填 `/v1/models` 里列出的任意官方对齐模型 ID（如 `deepseek-v4.1-flash`、`gpt-6-sol`、`glm-5.3`）。
 
 **Codex CLI / Claude Code（Responses API）**
 
@@ -557,6 +559,15 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
   DSH's pi-ai adapter reads only a model's `input` modalities, not `supportsVision` and not `/v1/models` capability fields, so the previous one-click config could not enable image input. Multimodal models now get `input: [text, image]`, and the config is written into the profile patch layer (`~/.dsh/profiles/*/cordis.patch.yml`) that DSH actually loads, leaving other providers, entries and comments untouched.
 - **DSH 一键配置放宽限流重试，修掉「对话到一半链接中断」**：WorkBuddy 的 429 冷却通常约一分钟，而 DSH 的默认 `retryPolicy` 是 `normal` / 最多 5 次 / 退避 500ms 起翻倍、封顶 10s——加起来不到 16 秒就放弃，冷却还没结束回合就以 `RATE_LIMIT` 失败。一键配置现在给 `wb-proxy` 单独写 `retryPolicy: {mode: normal, maxRetries: 8, backoff: {initialDelayMs: 2000, maxDelayMs: 30000, jitterRatio: 0.1}}`（合计约 2 分半），只影响 `wb-proxy`，其它 provider 仍用默认策略；字段与取值按 `@deepseek-ai/dsh-llm` 的 `RetryPolicySchema`。已经接入过的机器重新点一次「一键配置」即可补上这段（幂等），重启 DSH 生效。
   DSH's default per-provider retry policy (normal, at most 5 retries, 500ms→10s backoff, under 16 seconds in total) gives up before WorkBuddy's ~60s rate-limit cooldown ends, so the turn dies with `RATE_LIMIT` — which the user sees as the conversation breaking mid-flight. The one-click config now writes a wider `retryPolicy` for `wb-proxy` only (8 retries, 2s initial delay, 30s cap, ~2.5 minutes in total); other providers keep the default policy. Field names and bounds follow `@deepseek-ai/dsh-llm`'s `RetryPolicySchema`. Re-running the one-click config on an already-integrated machine adds it idempotently, and a DSH restart applies it.
+
+#### 个性化整合 · 2026-10-23 / Customization consolidation
+
+以最新上游 `v1.7.32`（`477ba36`）为基底，按职责追加以下四组记录；上游已覆盖的功能采用上游实现，完整取舍见 [docs/MINE.md](docs/MINE.md)。 / Based on upstream `v1.7.32` (`477ba36`), append four responsibility groups and prefer upstream where it supersedes a customization; see [docs/MINE.md](docs/MINE.md) for decisions.
+
+- **网关与账号 / Gateway and accounts**：保留 Account Hub 委托与令牌唯一写入、令牌/路由独立版本校验、Resin 受管出口与禁止直连回落；账单、目录、对话能力可独立配置，地址、凭据和出口按请求取快照，独立来源不接收其他账号凭据，不重放结果不确定的写请求。保留最近成功目录、实际响应可用性与空响应/推理用量判定，国际自动活跃停用。 / Retain delegated login with a single token writer, independent credential/route revisions, guarded egress, isolated capability sources and request snapshots. Preserve last-good catalogues, observed availability and truthful response accounting; disable international automated activity.
+- **面板 / Dashboard**：整合子路径与图标、委托来源及出口展示、模型验证/复测、能力设置和推理用量状态，补齐英文与繁体中文；与上游登录闸门、主题、筛选及模型标签共同工作。复测会发送一次真实模型请求。 / Combine subpath support, icons, delegation and egress display, model verification/retest, capability settings and usage status with the upstream dashboard and translations. A retest sends one real model request.
+- **验证与发布 / Verification and deployment**：把健康探测静默、阶段超时分类、有限关联诊断和精确 SHA 发布门禁归为一组；保留单一 4 秒预算、失败拒绝、发布锁、排空与原生恢复。全部 237 个套件在 GitHub-hosted CI 验证后生成产物，再由现有更新器核验并发布。 / Consolidate quiet health checks, bounded phase diagnostics and exact-SHA deployment. Keep the four-second budget, fail-closed gates, locks, draining and native recovery; package after 237 hosted suites and deploy through the existing updater.
+- **维护说明 / Maintenance documentation**：统一桥接契约、健康诊断、历史调研和升级取舍；移除旧模型快照及其测试替换、重复健康修复记录和过时的固定国际模型名单。后续同职责修复折叠进相应提交。 / Consolidate bridge contracts, health guidance, archived research and upgrade decisions; retire the old model snapshot and fixture substitutions, duplicate health entries and stale international model list. Fold later fixes into their owning topic.
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.30，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 
