@@ -221,7 +221,7 @@ def urlopen(req, timeout=30, proxy=""):
     重新 TCP+TLS 握手（真机实测 118.0ms，是请求路径上最大的一笔开销）。默认改走
     wb_upstream_pool：按（目标, 代理串, 凭据摘要）分池复用连接——不同账号不共用
     同一条 TCP/TLS 连接，同一账号仍复用。不能逐字节对齐 urllib 语义的请求（非
-    http(s) 目标、非 HTTP 代理、需要跟随的 3xx 重定向）由 PoolBypass 回退到下面
+    http(s) 目标、非 HTTP 代理）由 PoolBypass 回退到下面
     这条原来的路，行为与改动前一致；WB_UPSTREAM_KEEPALIVE=0 时整条路径都与改动
     前相同。
 
@@ -257,6 +257,16 @@ def urlopen(req, timeout=30, proxy=""):
     if wb_upstream_pool.enabled():
         try:
             return wb_upstream_pool.urlopen(req, timeout=timeout, proxy=proxy)
+        except wb_upstream_pool.PoolRedirect as redirect:
+            if independent:
+                raise wb_sources.SourceError('独立接口不允许重定向或传输回退') from None
+            # Continue urllib's response handling using the response already
+            # received. Reopening req would send the original POST twice.
+            opener = opener_for_proxy(proxy) or urllib.request.build_opener()
+            req.timeout = timeout
+            response = redirect.response
+            return opener.error('http', req, response, response.code,
+                                response.msg, response.headers)
         except wb_upstream_pool.PoolBypass:
             if independent:
                 raise wb_sources.SourceError('独立接口不允许重定向或传输回退') from None
@@ -272,19 +282,21 @@ def urlopen(req, timeout=30, proxy=""):
 
 def http_json(url, data=None, method=None, headers=None, timeout=30,
               retries=3, backoff=1.0, log=None, proxy=""):
-    """urlopen + json decode with retries.
+    """Decode JSON; only bodyless GET/HEAD may retry ambiguous failures.
 
-    Chinese networks and CDN edges routinely drop a TLS handshake with
-    "SSL: UNEXPECTED_EOF_WHILE_READING"; a single retry almost always
-    succeeds, so every upstream call goes through here.
+    A disconnected socket, 5xx or unreadable reply cannot establish that a
+    write was not accepted. CONNECT guard recovery stays inside urlopen,
+    where rejection proves no bytes reached the origin.
     """
-    attempts = max(1, int(retries or 1))
+    request_method = method or ("POST" if data is not None else "GET")
+    safe_read = request_method in ("GET", "HEAD") and data is None
+    attempts = max(1, int(retries or 1)) if safe_read else 1
     last = None
     for attempt in range(1, attempts + 1):
         req = wb_sources.request(
             url,
             data=data,
-            method=method or ("POST" if data is not None else "GET"),
+            method=request_method,
             headers=headers or {},
         )
         try:

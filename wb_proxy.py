@@ -15154,7 +15154,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         except Exception as exc:
             if (wb_accounts.is_tls_verify_error(exc)
                     or isinstance(exc, wb_sources.SourceError)
-                    or getattr(req, "capability_source", False)):
+                    or getattr(req, "capability_source", False)
+                    or getattr(exc, "wb_no_replay", False)):
                 last_error = exc
                 break
             if session_key and POOL:
