@@ -1,3 +1,4 @@
+import wb_bridge
 # -*- coding: utf-8 -*-
 """上游连接复用池：按 (scheme, host, port, 代理串, 凭据摘要) 复用 http.client 的
 keep-alive 连接。
@@ -23,8 +24,8 @@ Connection: keep-alive 这一处，见下面各函数的注释。
 行为与改动前完全一致）：
   - URL scheme 不是 http(s)；
   - 代理串不是 HTTP 代理（socks5:// 等，urllib 的 ProxyHandler 本来也不支持）；
-  - 上游回了 3xx：重定向跟随（含相对 Location、换主机、POST 降级 GET）是
-    urllib 一整条 HTTPRedirectHandler 的职责，不在这里重写，交回原路径处理。
+收到 3xx 时用 PoolRedirect 传递已有响应，由 urllib 的 HTTPRedirectHandler
+继续处理（含相对 Location、换主机、POST 降级 GET），不再发送一次原请求。
 
 总开关：WB_UPSTREAM_KEEPALIVE=0 关闭（默认开）。
 容量/回收：WB_UPSTREAM_POOL_SIZE（默认每键 2 条）、WB_UPSTREAM_POOL_IDLE（空闲
@@ -186,13 +187,24 @@ def shared_ssl_context():
 class PoolBypass(Exception):
     """这个请求不走连接池，调用方回退到 urllib 原路径。
 
-    只用于「还没发出去」的情形（URL/代理不受支持）和「收到 3xx 需要跟随」的情形。
+    只用于「还没发出去」的情形（URL/代理不受支持）。
     调用方（wb_accounts.urlopen）捕获后原样走原来的 opener，行为与改动前一致。
     """
 
 
+class PoolRedirect(PoolBypass):
+    """已经收到的重定向响应；禁止把原请求当作未发送而重放。
+
+    继承 PoolBypass 以保留受管出口和独立接口的禁止重定向规则。
+    """
+
+    def __init__(self, response):
+        Exception.__init__(self, "upstream answered %d" % response.code)
+        self.response = response
+
+
 class _StaleConnection(Exception):
-    """复用连接被对端关掉导致的失败：还没读到任何响应字节，可以安全重试一次。
+    """复用连接断开；不能由异常判断上游是否已处理请求。
 
     original 是原始异常（重试也失败时上抛它，保持错误形状不变）。
     """
@@ -697,7 +709,7 @@ def _exchange(conn, req, selector, scheme, proxy_info, key, reused,
     """在 conn 上完成一次请求/响应交换，返回挂好归还语义的响应对象。
 
     失败时抛：
-      - _StaleConnection：复用连接被对端关掉（还没读到任何响应字节，可重试一次）
+      - _StaleConnection：复用连接被对端关掉，由调用方按方法决定是否重试
       - _TransportFailure：其他传输失败，original 是要上抛给调用方的异常
       - 其他异常：连接不可信，调用方丢弃后原样上抛
     """
@@ -709,7 +721,7 @@ def _exchange(conn, req, selector, scheme, proxy_info, key, reused,
     except OSError as err:
         # 与 urllib do_open 一致：发送阶段（含惰性 connect）的 OSError 包成 URLError
         if reused and _stale_connection_error(err):
-            raise _StaleConnection(err) from None
+            raise _StaleConnection(urllib.error.URLError(err)) from None
         raise _TransportFailure(urllib.error.URLError(err)) from None
     try:
         resp = conn.getresponse()
@@ -743,8 +755,8 @@ def _fold_bypassed(host, proxy_raw):
     """
     proxy_info = _split_proxy(proxy_raw)
     if proxy_raw and proxy_info is None:
-        raise PoolBypass("proxy %r is not an http proxy" % (proxy_raw,))
-    if proxy_info and _proxy_bypassed(host):
+        raise PoolBypass("configured proxy is not an HTTP proxy")
+    if proxy_info and not wb_bridge.strict_proxy(proxy_raw) and _proxy_bypassed(host):
         return None, ""
     return proxy_info, proxy_raw
 
@@ -781,11 +793,9 @@ def urlopen(req, timeout=30, proxy="", headers=None):
     上，exc.read()/read(n)/fp 的行为不变）；发送阶段的 OSError 抛 URLError；
     其余 http.client 异常原样上抛。
 
-    复用连接被对端关掉时重试一次（仅此一种失败、仅此一次，且用新连接重试）：
-    安全边界是「还没发出请求体 / 还没读到任何响应字节」——发送阶段或状态行阶段
-    的连接级失败，此时对端不可能已经开始处理一个完整请求，重试不会造成重复计费
-    或重复工具调用；一旦读到响应（哪怕一个字节）或请求已完整发出后对端仍活着，
-    失败就不再重试，交给上层原有的重试语义。
+    复用连接断开时，仅无 body 的 GET/HEAD 可以用新连接重试一次。
+    发送异常或尚未收到响应都不能证明上游未执行；POST 及其他方法的结果不明时
+    直接上抛，不在池里重放。收到响应之后的读取失败也不重试。
     """
     scheme, host, port, selector = _target_parts(req.full_url)
     proxy_raw = str(proxy or "").strip()
@@ -806,9 +816,7 @@ def urlopen(req, timeout=30, proxy="", headers=None):
         return _new_connection(scheme, host, port, proxy_info, timeout)
 
     conn, reused = _POOL.acquire(key, timeout, factory)
-    # 只对可重放的 body（bytes/None）做安全重试：file-like 的 body 重发会从当前位置
-    # 续读，第二条请求会残缺。本仓库的调用点全是 bytes，这个判断只是兜底。
-    replayable = req.data is None or isinstance(req.data, (bytes, bytearray, memoryview))
+    retry_read = req.get_method() in ("GET", "HEAD") and req.data is None
     retried = False
     while True:
         try:
@@ -816,25 +824,29 @@ def urlopen(req, timeout=30, proxy="", headers=None):
                              ordered_headers)
         except _StaleConnection as stale:
             _POOL.discard(conn)
-            if reused and replayable and not retried:
-                # 探活漏掉的竞态：连接在探活之后、发送之前被对端关掉。换一条
-                # 全新连接重试一次（不重试池里的第二条：它同样可能已死，而且
-                # 再用池连接就把重试的安全前提破坏掉了）。
+            if reused and retry_read and not retried:
+                # 仅重试无 body 的读取；无响应不等于上游没有收到原请求。
                 retried = True
                 reused = False
                 conn = factory()
                 _POOL.note_created()
                 continue
+            if not retry_read:
+                stale.original.wb_no_replay = True
             raise stale.original
         except _TransportFailure as failure:
             _POOL.discard(conn)
+            if not retry_read:
+                failure.original.wb_no_replay = True
             raise failure.original
         except PoolBypass:
             # 连接已经由响应对象归还/关闭，这里不能再碰它
             raise
-        except Exception:
+        except Exception as error:
             # 连接状态未知（协议错、超时……）：不归还，直接关掉
             _POOL.discard(conn)
+            if not retry_read:
+                error.wb_no_replay = True
             raise
         status = resp.status
         if 200 <= status < 300:
@@ -844,9 +856,7 @@ def urlopen(req, timeout=30, proxy="", headers=None):
         body = _read_error_body(resp)
         resp.close()
         if 300 <= status < 400:
-            # 重定向跟随（相对 Location、换主机、POST 降级 GET）交给 urllib 原路径，
-            # 语义一字不改。代价是这一条请求会被发两次——3xx 在这条链路上不出现
-            # （都是 JSON API），值得。
-            raise PoolBypass("upstream answered %d; replayed via urllib" % status)
+            raise PoolRedirect(urllib.error.HTTPError(
+                req.full_url, status, resp.reason, resp.headers, io.BytesIO(body)))
         raise urllib.error.HTTPError(req.full_url, status, resp.reason,
                                      resp.headers, io.BytesIO(body))

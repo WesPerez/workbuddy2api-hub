@@ -577,9 +577,9 @@ print()
 print("[4] checkpoint：日桶随状态落盘/加载，重启后逐字节一致")
 check("写盘成功", make_checkpoint())
 stored = cache_data()
-check("每个 kind 文件都是 schema=当前版本（v5）的 JSON 对象",
+check("每个 kind 文件都是 schema=当前版本（v6）的 JSON 对象",
       all(json.load(io.open(KIND_FILES[k], encoding="utf-8"))["schema"]
-          == P._USAGE_CACHE_SCHEMA and P._USAGE_CACHE_SCHEMA == 5
+          == P._USAGE_CACHE_SCHEMA and P._USAGE_CACHE_SCHEMA == 6
           for k in P._USAGE_CACHE_KINDS if os.path.exists(KIND_FILES[k])),
       P._USAGE_CACHE_SCHEMA)
 check("四个 kinds 都在",
@@ -727,8 +727,9 @@ mutate(lambda d: newest_day(d, "series")["hours"].__setitem__(
 
 # 6.2 schema：旧文件整体作废（一次性全量重扫，结果正确）
 mutate_schema(lambda d: d.update({"schema": 2}), "旧 schema（v2，没有日桶）")
+mutate_schema(lambda d: d.update({"schema": 5}), "旧 schema（v5，未累计截断令牌）")
 mutate_schema(lambda d: d.update({"schema": 4}), "旧 schema（v4，价格指纹是旧形状）")
-mutate_schema(lambda d: d.update({"schema": 6}), "未来的 schema")
+mutate_schema(lambda d: d.update({"schema": P._USAGE_CACHE_SCHEMA + 1}), "未来的 schema")
 mutate_schema(lambda d: d.update({"schema": True}), "schema 写成 true")
 
 print()

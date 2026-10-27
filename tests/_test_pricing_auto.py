@@ -71,6 +71,9 @@ class PricingTestCase(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="wb-price-auto-case-")
         self.accounts = os.path.join(self.dir, "accounts")
         os.makedirs(self.accounts, exist_ok=True)
+        accounts_dir = unittest.mock.patch.object(P, "ACCOUNTS_DIR", self.accounts)
+        accounts_dir.start()
+        self.addCleanup(accounts_dir.stop)
         self._previous_dir = wb_pricing.data_dir()
         self._previous_settings = wb_pricing._settings_dir_override
         wb_pricing.set_data_dir(self.dir)
@@ -142,13 +145,12 @@ class UnionInputTests(PricingTestCase):
         self.assertEqual(sorted(unpriced2), sorted(unpriced))
 
     def test_run_once_prices_a_live_only_model(self):
-        original = P.read_cached_remote_catalog
-        P.read_cached_remote_catalog = lambda realm: (["glm-5.3-flashx"], {})
-        try:
+        # Exercise pricing's live input independently of persisted catalogue
+        # fallback from other tests or the machine's desktop cache.
+        with unittest.mock.patch.object(P, "curated_live_sources",
+                return_value=([("glm-5.3-flashx", {})], True, "remote")):
             refresher = self._refresher()
             ok, message = refresher.run_once()
-        finally:
-            P.read_cached_remote_catalog = original
         self.assertTrue(ok, message)
         self.assertEqual(refresher.last_extra, 1)
         _at, assignment = wb_pricing.current_assignment()
@@ -297,7 +299,7 @@ class SingleGatewayInstanceTests(PricingTestCase):
 
             def curated_live_sources(self, realm):
                 self.realms.append(realm)
-                return ([("gpt-6-sol", {})], True, "remote")
+                return ([("fixture-live-model", {})], True, "remote")
 
             def add_log_entry(self, message, tag=None):
                 self.lines.append((message, tag))
@@ -312,7 +314,7 @@ class SingleGatewayInstanceTests(PricingTestCase):
         self.assertEqual(fake.realms, ["intl", "cn"])
         # ...and the name the bundled catalogue has never seen is the one
         # that enters the price input.
-        self.assertEqual(ids, ["gpt-6-sol"])
+        self.assertEqual(ids, ["fixture-live-model"])
 
     def test_the_pricing_lines_reach_the_running_gateway(self):
         fake = self._fake_gateway()

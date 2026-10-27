@@ -470,6 +470,21 @@ class RetryRoundChargeTests(unittest.TestCase):
         self.assertEqual(account.fails, 1)
         self.assertEqual(account.degrade_count, 1)
 
+    def test_ambiguous_pooled_write_is_not_retried_by_chat(self):
+        account = load_account("u-no-write-replay")
+        calls = []
+        error = urllib.error.URLError("upstream accepted request then disconnected")
+        error.wb_no_replay = True
+
+        def urlopen(req, timeout=30, proxy=""):
+            calls.append(req)
+            raise error
+
+        with mock.patch.object(time, "sleep"):
+            self._drive(account, urlopen)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(account.fails, 0, "uncertain transport is not an account fault")
+
     def test_a_gateway_5xx_charges_the_account_once(self):
         account = load_account("u-charge-5xx")
 

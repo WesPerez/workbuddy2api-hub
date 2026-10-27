@@ -3,7 +3,7 @@
 测的是 wb_upstream_pool 对 wb_accounts.urlopen 出站路径的接管：复用命中、容量与
 空闲回收、连接被对端掐掉时的探活与「安全重试一次」、Connection: close 与半截
 body 的丢弃、流式（chunked）读干净才归还、复用前重置读超时、按代理串分池、
-3xx 回退、TLS、WB_UPSTREAM_KEEPALIVE=0 时与改动前逐项一致、chat 路径的头名
+3xx 继续处理且不重放原请求、TLS、WB_UPSTREAM_KEEPALIVE=0 时与改动前逐项一致、chat 路径的头名
 保真（有序原名原样上线）、以及按账号凭据分池（不同账号不共用 TCP/TLS 连接）。
 
 全部用本机假上游：真 TCP、会说 keep-alive / chunked / Connection: close / 429 /
@@ -199,11 +199,11 @@ class FakeUpstream(object):
                     header_lines.append((name, value))
                     headers[name.lower()] = value
                 length = int(headers.get("content-length") or 0)
-                if length:
-                    fh.read(length)
+                body = fh.read(length) if length else b""
                 with self.lock:
                     self.requests.append({"method": method, "target": target,
                                           "headers": headers,
+                                          "body": body,
                                           "header_lines": header_lines})
                 if not self._respond(conn, method, target):
                     break
@@ -257,6 +257,8 @@ class FakeUpstream(object):
         elif path == "/reset":
             # 读完请求再关，不发任何响应字节：客户端必然停在 RemoteDisconnected
             return False
+        elif path == "/server-error":
+            self._send(conn, 503, "Service Unavailable", b'{}')
         elif path == "/delay":
             time.sleep(0.5)
             self._send(conn, 200, "OK", OK_BODY)
@@ -272,6 +274,10 @@ class FakeUpstream(object):
         elif path == "/redirect":
             self._send(conn, 302, "Found", b"",
                        extra=[("Location", "http://127.0.0.1:%d/ok" % self.port)])
+        elif path.startswith("/redirect-"):
+            code = int(path.rsplit("-", 1)[1])
+            self._send(conn, code, "Redirect", b"redirect",
+                       extra=[("Location", "/ok")])
         else:
             self._send(conn, 404, "Not Found", b"{}")
         return True
@@ -531,6 +537,74 @@ try:
     check("死连接被丢弃、重试用新连接", delta["discarded"] >= 1 and delta["created"] == 1,
           delta)
 
+    print("[8a] 完整 POST 已被上游接受但无响应：不重放")
+    srv8a = new_server()
+    pool.close_all()
+    resp = fetch(srv8a.base() + "/ok")
+    resp.read()
+    resp.close()
+    payload = b'{"charge":"once"}'
+    before = pool.stats()
+    raised = None
+    try:
+        fetch(srv8a.base() + "/reset", data=payload, method="POST")
+    except Exception as exc:
+        raised = exc
+    received = [q for q in srv8a.requests if q["target"] == "/reset"]
+    check("上游只收到一个完整 POST",
+          len(received) == 1 and received[0]["body"] == payload, received)
+    check("结果不明直接抛出，无新连接重放",
+          isinstance(raised, http.client.RemoteDisconnected)
+          and sdelta(before)["created"] == 0 and srv8a.accepted == 1,
+          (repr(raised), sdelta(before), srv8a.accepted))
+    check("失效连接不再留在池中", idle_for(srv8a.port) == 0)
+    check("结果不明标志传给上层，阻止换号重试", getattr(raised, "wb_no_replay", False))
+
+    print("[8c] JSON 包装层也不能重放已经收到的写请求")
+    srv8c = new_server()
+    pool.close_all()
+    for path in ("/reset", "/server-error"):
+        raised = None
+        try:
+            wb_accounts.http_json(srv8c.base() + path, data=payload,
+                                  method="POST", retries=3, backoff=0)
+        except Exception as exc:
+            raised = exc
+        received = [q for q in srv8c.requests if q["target"] == path]
+        check("JSON POST %s 即使 retries=3 也只发一次" % path,
+              raised is not None and len(received) == 1
+              and received[0]["body"] == payload, received)
+
+    print("[8b] 发送阶段结果不明：POST/PATCH/PUT/DELETE 均不重放")
+    for method in ("POST", "PATCH", "PUT", "DELETE", "GET"):
+        srv8b = new_server()
+        pool.close_all()
+        resp = fetch(srv8b.base() + "/ok")
+        resp.read()
+        resp.close()
+        held = [c for key, entries in pool._POOL._idle.items()
+                if key[2] == srv8b.port for c, _ts in entries][0]
+        original_request = held.request
+        calls = []
+
+        def send_then_fail(*args, **kwargs):
+            calls.append(True)
+            original_request(*args, **kwargs)
+            raise BrokenPipeError("ambiguous send")
+
+        held.request = send_then_fail
+        before = pool.stats()
+        raised = None
+        try:
+            fetch(srv8b.base() + "/echo", data=payload, method=method)
+        except Exception as exc:
+            raised = exc
+        check("%s 含 body 的发送失败保留 URLError，不重放" % method,
+              isinstance(raised, urllib.error.URLError)
+              and isinstance(raised.reason, BrokenPipeError)
+              and len(calls) == 1 and sdelta(before)["created"] == 0,
+              (repr(raised), sdelta(before)))
+
     # ------------------------------------------------------------------
     print("[9] 全新连接的失败不重试（错误形状与改动前一致）")
     srv9 = new_server()
@@ -602,7 +676,7 @@ try:
     check("两个代理串各占一个池键", keys == sorted([p1, p2]), keys)
 
     # ------------------------------------------------------------------
-    print("[12] 3xx 重定向：回退 urllib 跟随，客户端拿到最终响应")
+    print("[12] 3xx 重定向：由已有响应继续，原请求只发一次")
     srv12 = new_server()
     pool.close_all()
     resp = fetch(srv12.base() + "/redirect")
@@ -611,8 +685,30 @@ try:
     resp.close()
     check("最终拿到 200 与 /ok 的 body", status == 200 and body == OK_BODY,
           (status, body))
-    check("服务端看到了原始请求与回退重放", len(srv12.requests) >= 2,
-          len(srv12.requests))
+    check("仅原始 GET 与目标 GET，没有重放原请求",
+          [(q["method"], q["target"]) for q in srv12.requests]
+          == [("GET", "/redirect"), ("GET", "/ok")], srv12.requests)
+    for code in (301, 302, 303, 307, 308):
+        srv12p = new_server()
+        pool.close_all()
+        raised = None
+        body = None
+        path = "/redirect-%d" % code
+        try:
+            resp = fetch(srv12p.base() + path, data=payload, method="POST")
+            body = resp.read()
+            resp.close()
+        except urllib.error.HTTPError as exc:
+            raised = exc
+        expected = [("POST", path)]
+        if code in (301, 302, 303):
+            expected.append(("GET", "/ok"))
+        check("POST %d 原路径只发一次，保留 urllib 方法规则" % code,
+              [(q["method"], q["target"]) for q in srv12p.requests] == expected
+              and srv12p.requests[0]["body"] == payload
+              and (body == OK_BODY if code in (301, 302, 303)
+                   else raised is not None and raised.code == code),
+              (srv12p.requests, repr(raised)))
 
     # ------------------------------------------------------------------
     print("[13] TLS（https 直连）：复用、探活、流式归还都成立")

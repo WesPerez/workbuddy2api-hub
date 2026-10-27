@@ -145,6 +145,8 @@ class AggregateHarness(unittest.TestCase):
             # 失败但上游已经计费：令牌与费用照折，只记 errors。
             _row(T0 + 200, MODEL_A, ACCT_B, 2000, 500, outcome="failed",
                  policy=self.pid_a, credit=0.25),
+            _row(T0 + 250, MODEL_A, ACCT_B, 1000, 12000, outcome="incomplete",
+                 policy=self.pid_a, credit=0.5, reasoning=12000),
             # 没有 cost_policy：走时间线回填，价与 A 相同。
             _row(T0 + 300, MODEL_B, ACCT_A, 3000, 600),
             # 只有内置快照认识：走 builtin 分支。
@@ -183,9 +185,9 @@ class AggregateSkipsDetailsTests(AggregateHarness):
         # 明细被跳过，价本身照算：三档单价那部分才是被省掉的。
         self.assertGreater(analytics["summary"]["all_time"]["cost_cny"], 0)
         self.assertGreater(snap["cost_cny"], 0)
-        # 4 条 completed + 1 条 failed；client_aborted 整行跳过。
+        # 4 条 completed + 1 条 failed + 1 条 incomplete；client_aborted 整行跳过。
         self.assertEqual(analytics["summary"]["all_time"]["requests"], 4)
-        self.assertEqual(analytics["summary"]["all_time"]["errors"], 1)
+        self.assertEqual(analytics["summary"]["all_time"]["errors"], 2)
 
     def test_the_payload_is_identical_when_details_are_skipped(self):
         normal = P._compute_usage_analytics_uncached()
@@ -343,9 +345,9 @@ class AggregateMatchesPerRowCostingTests(AggregateHarness):
         for field in FOLD_FIELDS:
             self.assertEqual(analytics["summary"]["window"][field],
                              expected[field], field)
-        # all_time 与窗口无关，仍是整份日志（4 条 completed、1 条 failed）。
+        # all_time 与窗口无关，仍是整份日志（4 条 completed、1 条 failed、1 条 incomplete）。
         self.assertEqual(analytics["summary"]["all_time"]["requests"], 4)
-        self.assertEqual(analytics["summary"]["all_time"]["errors"], 1)
+        self.assertEqual(analytics["summary"]["all_time"]["errors"], 2)
 
     def test_model_rows_fold_every_outcome(self):
         analytics = P._compute_usage_analytics_uncached()
@@ -406,13 +408,33 @@ class AggregateMatchesPerRowCostingTests(AggregateHarness):
                 expected_cost += cost["cny"]
             else:
                 missing[r["model"]] = missing.get(r["model"], 0) + 1
-            if outcome == "completed":
+            if outcome in ("completed", "incomplete"):
                 completed_tokens += r["total_tokens"]
         self.assertAlmostEqual(snap["cost_cny"], expected_cost, places=9)
         self.assertEqual(snap["cost_missing"], missing)
         self.assertEqual(snap["requests"], 4)
-        self.assertEqual(snap["errors"], 2)
+        self.assertEqual(snap["errors"], 3)
         self.assertEqual(snap["total_tokens"], completed_tokens)
+
+    def test_incomplete_tokens_survive_snapshot_and_series(self):
+        # Isolate the billed incomplete row: it must add usage, not success.
+        row = next(r for r in self.rows if r["outcome"] == "incomplete")
+        snap = P._usage_snapshot_uncached(since=row["at"], until=row["at"])
+        self.assertEqual((snap["requests"], snap["errors"]), (0, 1))
+        for bucket in (snap, snap["by_model"][MODEL_A],
+                       snap["by_model_realm"][MODEL_A]["intl"],
+                       snap["by_model_acct"][MODEL_A]["intl"][ACCT_B]):
+            self.assertEqual(bucket["total_tokens"], 13000)
+            self.assertEqual(bucket["reasoning_tokens"], 12000)
+            self.assertEqual(bucket["credit"], 0.5)
+            self.assertEqual(bucket["requests"], 0)
+        series = P._usage_timeseries_scan(None, row["at"], row["at"], 60)["series"]
+        self.assertEqual(len(series), 1)
+        self.assertEqual((series[0]["requests"], series[0]["errors"]), (0, 1))
+        self.assertEqual(series[0]["total_tokens"], 13000)
+        cached = P._new_series_bucket(series[0]["at"])
+        P._feed_series_bucket(cached, row)
+        self.assertEqual(cached, series[0])
 
     def test_the_key_rows_fold_the_same_way(self):
         # key_map 轴与 acct/model 同源：没有 key 字段的历史行落进 __before_keys__，

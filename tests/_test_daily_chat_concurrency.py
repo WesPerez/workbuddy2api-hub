@@ -25,6 +25,12 @@ import wb_settings  # noqa: E402
 ACCOUNTS = os.path.join(_TMP.name, "accounts")
 
 
+# Exercise dormant upstream behavior with fake accounts/transports only.
+# Production policy remains False; tests/_test_bridge.py pins that boundary.
+import wb_bridge
+wb_bridge.daily_enabled = lambda: True
+
+
 class FakePool(object):
     def __init__(self, directory, accounts):
         self.dir = directory

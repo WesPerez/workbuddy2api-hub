@@ -57,13 +57,13 @@ class CanReportActivityTests(unittest.TestCase):
         self.assertFalse(res.get("ok"))
         self.assertIn("enterprise", res.get("error", ""))
 
-    def test_intl_account_can_report(self):
-        # issue #645：国际版也有 growth 连登（www.workbuddy.ai 的 /activity/growth/streak），
-        # 只是上报端点不同，所以它同样算「今天还没做过活跃上报」。
+    def test_intl_account_respects_disabled_gate(self):
         acc = make_account(realm="intl")
-        self.assertTrue(acc.can_report_activity(), acc.realm)
-        acc.last_activity_report = time.strftime("%Y-%m-%d %H:%M:%S")
         self.assertFalse(acc.can_report_activity())
+        with mock.patch.object(wb_accounts.wb_bridge, "daily_enabled", return_value=True):
+            self.assertTrue(acc.can_report_activity())
+            acc.last_activity_report = time.strftime("%Y-%m-%d %H:%M:%S")
+            self.assertFalse(acc.can_report_activity())
 
     def test_cn_account_without_record_can_report(self):
         acc = make_account(realm="cn")
@@ -94,7 +94,8 @@ class ReportActivityTests(unittest.TestCase):
             seen.append((account.uid, base))
             return True
 
-        with mock.patch.object(wb_tasks, "report_events", fake_report_events), \
+        with mock.patch.object(wb_accounts.wb_bridge, "daily_enabled", return_value=True), \
+             mock.patch.object(wb_tasks, "report_events", fake_report_events), \
              mock.patch.object(wb_tasks, "fetch_streak_days", return_value=3):
             res = acc.report_activity()
         self.assertTrue(res.get("ok"), res)

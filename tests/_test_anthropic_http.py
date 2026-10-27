@@ -70,7 +70,8 @@ def sse(chunks):
     out = []
     for c in chunks:
         out.append(("data: " + json.dumps(c) + "\n\n").encode("utf-8"))
-    out.append(b"data: [DONE]\n\n")
+    if MOCK.get("done", True):
+        out.append(b"data: [DONE]\n\n")
     return b"".join(out)
 
 
@@ -441,6 +442,92 @@ try:
               for r in stream_rows), stream_rows[-3:])
     check("streamed messages record cache hits",
           any((r.get("cached_tokens") or 0) == 3 for r in stream_rows), stream_rows[-3:])
+    print("[8] terminal state matrix across all gateway protocols")
+    for finish in ("stop", "length"):
+        for path in ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/responses/compact"):
+            for streaming in (False, True):
+                before_rows = sum(1 for line in open(usage_log) if line.strip())
+                MOCK["stream"] = True
+                MOCK["chunks"] = [
+                    {"choices": [{"index": 0, "delta": {"content": "checkpoint fact"}, "finish_reason": finish}],
+                     "usage": {"prompt_tokens": 11, "completion_tokens": 2, "total_tokens": 13}}
+                ]
+                payload = {"model": "deepseek-v4.1-flash", "stream": streaming,
+                           "max_tokens": 100, "reasoning_effort": "max", "reasoning": {"effort": "max"}, "output_config": {"effort": "max"}, "messages": [{"role": "user", "content": "summarize"}]}
+                if "responses" in path:
+                    payload["input"] = [{"role": "user", "content": "summarize"}]
+                code, headers, body = request("POST", path, payload,
+                    headers={"Authorization": "Bearer TESTKEY", "x-api-key": "TESTKEY"})
+                label = "%s stream=%s finish=%s" % (path, streaming, finish)
+                check(label + " HTTP 200", code == 200, body[-300:])
+                if "responses" in path:
+                    status = "incomplete" if finish == "length" else "completed"
+                    if streaming:
+                        events = parse_sse(body)
+                        check(label + " lifecycle", [n for n, _ in events][:2] == ["response.created", "response.in_progress"], events[:2])
+                        terminals = [(n, e) for n, e in events if n in ("response.completed", "response.incomplete", "response.failed")]
+                        check(label + " SSE terminal", len(terminals) == 1 and terminals[0][0] == "response." + status, terminals)
+                        result = terminals[0][1].get("response", {}) if terminals else {}
+                    else:
+                        result = json.loads(body)
+                    check(label + " response status", result.get("status") == status, result)
+                    if finish == "length" and path.endswith("compact"):
+                        check(label + " no partial checkpoint", result.get("output") == [], result)
+                if path.endswith("chat/completions"):
+                    if streaming:
+                        chunks = [json.loads(line[5:]) for line in body.decode("utf-8").splitlines()
+                                  if line.startswith("data:") and line[5:].strip() != "[DONE]"]
+                        finishes = [c.get("finish_reason") for chunk in chunks
+                                    for c in chunk.get("choices", []) if c.get("finish_reason")]
+                        check(label + " chat finish", finishes == [finish], finishes)
+                    else:
+                        check(label + " chat finish", json.loads(body)["choices"][0]["finish_reason"] == finish)
+                if path.endswith("messages"):
+                    if streaming:
+                        stops = [e["delta"]["stop_reason"] for n, e in parse_sse(body) if n == "message_delta"]
+                        check(label + " message stop", stops == ["max_tokens" if finish == "length" else "end_turn"], stops)
+                    else:
+                        check(label + " message stop", json.loads(body).get("stop_reason") == ("max_tokens" if finish == "length" else "end_turn"))
+                with open(usage_log, encoding="utf-8") as fh:
+                    recorded = [json.loads(line) for line in fh if line.strip()]
+                    last = recorded[-1]
+                check(label + " exactly one usage row", len(recorded) == before_rows + 1, len(recorded) - before_rows)
+                check(label + " recorded terminal", last.get("outcome") == ("incomplete" if finish == "length" else "completed")
+                      and last.get("finish_reason") == finish and last.get("stream") == streaming, last)
+                check(label + " tokens retained", last.get("completion_tokens") == 2, last)
+                check(label + " effort retained", last.get("reasoning_effort") == "max", last)
+    print("[9] clean EOF and supported terminal variants")
+    for ending in ("missing", "finish_only", "done_only"):
+        for path in ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/responses/compact"):
+            for streaming in (False, True):
+                before_rows = sum(1 for line in open(usage_log) if line.strip())
+                before_calls = len(MOCK["requests"])
+                MOCK["done"] = ending == "done_only"
+                MOCK["chunks"] = [{"choices": [{"index": 0, "delta": {"content": "a partial fact"},
+                                    "finish_reason": "stop" if ending == "finish_only" else None}],
+                                   "usage": {"prompt_tokens": 11, "completion_tokens": 2, "total_tokens": 13}}]
+                payload = {"model": "deepseek-v4.1-flash", "stream": streaming, "max_tokens": 100,
+                           "messages": [{"role": "user", "content": "summary"}]}
+                if "responses" in path:
+                    payload["input"] = [{"role": "user", "content": "summary"}]
+                code, headers, body = request("POST", path, payload,
+                    headers={"Authorization": "Bearer TESTKEY", "x-api-key": "TESTKEY"})
+                label = "%s stream=%s ending=%s" % (path, streaming, ending)
+                with open(usage_log, encoding="utf-8") as fh:
+                    recorded = [json.loads(line) for line in fh if line.strip()]
+                check(label + " one request, one usage row", len(MOCK["requests"]) == before_calls + 1
+                      and len(recorded) == before_rows + 1, (len(MOCK["requests"]) - before_calls, len(recorded) - before_rows))
+                if ending == "missing":
+                    check(label + " recorded failure", recorded[-1].get("outcome") != "completed", recorded[-1])
+                    if not streaming or path.endswith("compact"):
+                        check(label + " HTTP failure", code == 502, (code, body[-300:]))
+                    else:
+                        check(label + " no fabricated completion", b"response.completed" not in body
+                              and b"message_stop" not in body and b"data: [DONE]" not in body, body[-300:])
+                else:
+                    check(label + " success", code == 200 and recorded[-1].get("outcome") == "completed", (code, recorded[-1]))
+    MOCK["done"] = True
+
 finally:
     try:
         gateway.shutdown()

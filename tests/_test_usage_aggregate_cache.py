@@ -472,8 +472,8 @@ check("每个写出的 kind 文件都是 schema=当前版本、kind 标签正确
           for k in P._USAGE_CACHE_KINDS if os.path.exists(KIND_FILES[k])),
       {k: (kind_file_data(k).get("schema"), kind_file_data(k).get("kind"))
        for k in P._USAGE_CACHE_KINDS if os.path.exists(KIND_FILES[k])})
-check("schema 版本是 v5（一类一份的布局 + 「用到的价」指纹）",
-      P._USAGE_CACHE_SCHEMA == 5, P._USAGE_CACHE_SCHEMA)
+check("schema 版本是 v6（保留截断用量，旧快照重建）",
+      P._USAGE_CACHE_SCHEMA == 6, P._USAGE_CACHE_SCHEMA)
 check("三份状态都写进去了（每个 realm 一份）",
       len(stored["snapshot"]) == 3 and len(stored["by_account"]) == 1
       and len(stored["analytics"]) == 3,
