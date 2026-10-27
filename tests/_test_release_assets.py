@@ -325,14 +325,40 @@ class RuntimeTrimTests(unittest.TestCase):
         # Every stdlib module the gateway imports has to be in the contract
         # list, or the trim could drop the thing it depends on.
         imported = set()
+        optional_seen = set()
         for path in glob.glob(os.path.join(ROOT, "wb_*.py")):
             with open(path, encoding="utf-8") as fh:
                 tree = ast.parse(fh.read())
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
-                    imported.update(a.name.split(".")[0] for a in node.names)
+                    for alias in node.names:
+                        name = alias.name.split(".")[0]
+                        if name in portable_runtime.OPTIONAL_UNAVAILABLE_MODULES:
+                            self.assertIn(os.path.basename(path), portable_runtime.OPTIONAL_UNAVAILABLE_MODULES[name])
+                            # A mere try/except somewhere in the file is not a
+                            # guard. This exact import must be the sole body of
+                            # an ImportError handler that binds the module None.
+                            guards = [item for item in tree.body if isinstance(item, ast.Try)
+                                      and item.body == [node] and len(node.names) == 1
+                                      and len(item.handlers) == 1 and not item.orelse and not item.finalbody]
+                            self.assertEqual(len(guards), 1, name + " optional import is unguarded")
+                            handler = guards[0].handlers[0]
+                            self.assertIsInstance(handler.type, ast.Name)
+                            self.assertEqual(handler.type.id, "ImportError")
+                            self.assertEqual(len(handler.body), 1)
+                            assignment = handler.body[0]
+                            self.assertIsInstance(assignment, ast.Assign)
+                            self.assertEqual(len(assignment.targets), 1)
+                            self.assertIsInstance(assignment.targets[0], ast.Name)
+                            self.assertEqual(assignment.targets[0].id, alias.asname or name)
+                            self.assertIsInstance(assignment.value, ast.Constant)
+                            self.assertIsNone(assignment.value.value)
+                            optional_seen.add(name)
+                        else:
+                            imported.add(name)
                 elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                     imported.add(node.module.split(".")[0])
+        self.assertEqual(optional_seen, set(portable_runtime.OPTIONAL_UNAVAILABLE_MODULES))
         local = {os.path.basename(p)[:-3] for p in glob.glob(os.path.join(ROOT, "wb_*.py"))}
         # sys / time and friends are compiled into python312.dll, so the trim
         # cannot remove them and they have no Lib/ file to check.

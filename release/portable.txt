@@ -56,6 +56,7 @@ wb_atrest.py
 wb_catalog.py
 wb_egress.py
 wb_fingerprint.py
+wb_health_diagnostics.py
 wb_identity.py
 wb_ipintel.py
 wb_logstore.py
@@ -65,8 +66,10 @@ wb_probes.py
 wb_prompt.py
 wb_proxy.py
 wb_quota_scan.py
+wb_resin.py
 wb_scheduler.py
 wb_settings.py
+wb_sources.py
 wb_tasks.py
 wb_tiers.py
 wb_updates.py
@@ -79,3 +82,6 @@ wb_webagent.py
 wb_webprompts.py
 wb_webtools.py
 wb_window_probe.py
+
+wb_bridge.py
+favicon.svg
