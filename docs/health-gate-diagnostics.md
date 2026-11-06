@@ -1,0 +1,129 @@
+# WorkBuddy 部署健康门禁诊断 / Deployment health diagnostics
+
+## 不可变身份热路径优化 / Immutable identity hot path
+
+正式 0c84d7b 的 02:23:39–04:05 CST 自然窗口中，39 个带 ID client 结果为19成功/20超时，
+全部可关联 server ID；18个超时 terminal 有完整 release 阶段，间隔315–4747ms。
+这是阶段墙钟间隔，含调度/换页/诊断开销，不等于纯磁盘耗时，不能据此声称GIL或swap单一根因。
+其他解析、busy和发送阶段也有延迟。分别起点的client/server offset不能直接相减。
+
+本次最小改动在 module import、监听前一次读取本 release 的元数据（最多4097字节，4096上限），
+只接受对象内40位小写hex commit；缺失/非法则 development，继续被正式 updater exact SHA拒绝。
+请求只读固定字符串，不缓存busy、不改重试/四秒门禁/部署锁/drain/回滚。新SHA须由新进程加载，
+不能让已运行旧进程因current链接或元数据改写冒充新版本。release_read/release_done旧阶段名保留，
+但本候选后代表内存身份读取，不再代表磁盘读。资源配置及其他应用不改。
+
+This bounded optimization removes per-probe release metadata I/O, not all scheduling/page-in latency.
+Identity is loaded once before serving; invalid metadata fails closed and cannot heal by a later file rewrite.
+Busy remains live. Synthetic hosted tests cover metadata types/size/errors, immutable identity and live busy;
+existing updater same-SHA/idle/drain/rollback/deadline fixtures remain required. No account/upstream request.
+Natural post-deployment outcomes are still required; no root-cause completion claim is made.
+
+本候选仅增强健康探测的原因分类和保守拒绝，不声称修复了已经证明的 GIL 或网络根因。
+The candidate adds classified, fail-closed health results; it does not claim a proven GIL/network root cause.
+
+## 已知事实 / Observations
+
+- 生产 `f8b3c626b4757f6658df1313237a7da33ab0b831` 已包含 `/healthz` 成功 GET 日志静默；该修复不重复。
+  The existing successful-GET logging fix is already live and is not repeated.
+- 10-20 至 10-21 05:15 的只读自然样本累计 235 `unhealthy_current` / 498 `current`；旧日志没有 health 原因，不能将其全部归为误报。
+  Existing events lack per-probe reasons; 235 rejected / 498 accepted natural updater checks do not establish a single cause or false positives.
+- 当前 `daily_enabled()` 为常量 False，busy 读取没有获取账号锁。本候选不修改服务端 busy 或账号逻辑。
+  Daily scheduling is constant False; this change does not alter account/busy logic.
+
+## 边界 / Contract
+
+- 单一 monotonic 4 秒判定预算，保留旧探测的完整首次响应预算。只有明确瞬时连接/读超时、reset/refused/disconnect 等才可用剩余预算再尝试一次。
+  One monotonic four-second decision budget; the first attempt is not shortened. Only classified transient failures can use the remaining budget for one retry.
+- HTTP 状态、过大响应、JSON/对象/字段类型错误、ok=false、commit 不符、真实 busy 都拒绝；不在单次探测内部重试成通过。
+  Semantic failures are not retried inside a probe. Missing/invalid fields fail closed.
+- current / 新版健康检查校验精确 SHA；预发布 idle 和 drain 后 idle 校验实际旧 runtime 的 SHA，`activeJobs` 必须为非 bool 的非负整数，idle 只接受零。
+  Idle probes additionally bind to the actual old runtime revision; non-idle current checks still permit real busy jobs.
+- 原部署后的启动轮询与 drain 轮询继续存在并有界；新结果类型只改变诊断，不跳过锁/制品/空闲/drain/回滚。
+  Existing bounded deployment/drain loops remain; structured results do not bypass safety gates.
+- GET reader 使用独立进程，总预算结束即 kill/reap；没有 timeout 后继续读取的后台线程。进程创建与操作系统回收不能保证硬墙钟上界；超预算结果永不成功，但不声称系统冻结时必在 4 秒内退出。
+  An isolated GET reader is killed and reaped on expiry. OS process creation/reaping is not a hard wall-clock promise; results after the decision deadline cannot be accepted.
+- URL 只经 stdin 传给 reader；不跟重定向、不使用环境代理，仅继承有限 OS 运行变量。日志白名单为 reason/status/elapsed/attempts/安全 SHA；不输出响应/异常文本/URL/认证/账号。
+  Worker stdin carries the configured URL; it never appears in argv/logs. Redirects and inherited proxies are disabled, and diagnostics are allowlisted.
+
+## 验证和发布 / Validation and release
+
+可控 loopback fixture 覆盖正常、错误 SHA/ok/busy/schema/JSON/过大、HTTP 异常、断连恢复和耗尽、延迟 header/read/trickle、完整首次慢响应、日志脱敏，以及 current/idle/drain/启动失败回滚。
+Loopback fixtures cover semantic/transport/deadline cases and fail-closed current/idle/drain/rollback paths, without real accounts or upstream requests.
+
+本机仅 AST/diff 静态检查；所有测试和打包在 GitHub-hosted 执行。候选分支不是 mine，不能被正式 updater 接受或自动部署。
+Local validation is static only. Candidate-hosted evidence does not authorize automatic deployment.
+
+实际 systemd 调用 `/opt/workbuddy-hub/updater/deploy/update.py`，安装器切换 updater 与 current 后下一次 timer 才使用新代码；必须读回两份身份和自然分类日志。
+The actual systemd updater path, not merely the runtime's copy, must be verified after a controlled release.
+
+如果自然日志只支持诊断增强，继续将故障根因标为 unknown；短时没有失败仅支持该窗口，不声称永久健康。
+Root cause remains unknown until classified natural evidence supports it; a quiet window is not proof of permanent health.
+
+## Deterministic remaining-usage fixture follow-up
+
+Formal mine runs 39519247960 and 39519727087 exposed the same unrelated
+`test_live_event_dedupes_against_the_log_row` failure (`n=2`, expected 1).
+The old fixture sent a fractional local-time epoch to the live path but a
+second-precision UTC+8-parser epoch to the log path. Production still dedupes
+exact `(account, model, reset)` identity; this patch does not relax that rule.
+The fixture now uses an integer future epoch and the existing inverse
+`cap_detail`, asserting parser identity before exercising both paths.
+No assertions are removed, no real credentials or upstream requests are used.
+All tests/builds stay GitHub-hosted under the server's user instruction.
+
+正式 mine 两次相同失败是旧 fixture 的精确 reset 不一致；修复只统一测试输入，
+不改变生产去重/限流、健康门禁或账号状态。三平台完整矩阵、回滚检查和 exact
+mine 包仍为发布前提；历史候选成功不能替代最终 SHA。
+
+
+## 服务端关联诊断 / Server correlation (candidate)
+
+客户端父进程每次 attempt 产生随机32hex `probe_id`，只传固定header并白名单记录最后一次ID。
+服务端仅 exact loopback GET `/healthz` + 单一合法 header 启用；query/其他route/外部请求不诊断，响应不变。
+接受阶段仅256个弱socket引用/时间的环（对象身份重核），识别前不写日志；解析成功后
+保留accept/handler/requestline/headers、release/busy/daily读取以及响应headers/body阶段。
+不重复读取配置/账号或改变busy。尚未解析的请求无法关联，缺失仍为preparse_unknown。
+
+Server telemetry accepts only an exact loopback health request with one opaque header.
+A weak-reference bounded pre-route ring cannot turn an absent record into evidence of no accept.
+Health reads and busy semantics are unchanged; callbacks mark the existing reads only.
+
+固定64active、128完成队列、每60秒最多32条新关联、120秒TTL；非阻塞锁遇争用直接丢诊断。
+观察者在serve_forever前启动，只有一个daemon，每0.25秒复制安全字段后释放锁再输出。
+正常请求一条完成摘要；4秒尚未完最多一条pending，随后terminal/expired，均非健康判定。
+stdout阻塞只阻观察者，队列仍有界；OS/GIL整体冻结时诊断也可能延后，不承诺硬墙钟。
+HTTP200/complete仅响应发送阶段，不等于业务/账号健康；pending不授权更新。
+
+The observer is lossy and bounded (64 active, 128 completed, 32 starts/minute, 120s TTL).
+It never writes while holding a diagnostic lock; handler hooks never wait for telemetry.
+Blocking stdout can lose/delay evidence, not block HTTP or relax the four-second client decision.
+No extra diagnostic HTTP request, model request, credentials, URL/body or account identifiers are logged.
+Natural correlation is still required to locate the failure; no GIL/root-cause claim is made.
+
+## Handler-thread counters / 处理线程计数器
+
+Each accepted probe records the handler thread's native ID and a baseline at
+`headers_parsed`. Later handler stages may record cumulative non-negative
+deltas for `thread_time_ns()` and, on platforms that expose it,
+`getrusage(RUSAGE_THREAD)` minor/major faults and voluntary/involuntary context
+switches at seven fixed milestones. The observer only serializes the last
+handler samples, and a thread-ID change drops that stage's delta; a detected
+counter reset invalidates that counter for the rest of the probe. Values are bounded
+to allowlisted integer fields; sampler failure is lossy and keeps the existing
+wall-clock stages. These counters can show work attributed to the same handler
+thread near a timeout, but they cannot identify a backing file, prove page-in
+caused the delay, or establish GIL/resource pressure as the root cause. A
+pending/expired row cannot sample a handler that is currently blocked; a later
+handler milestone is needed for the interval counters. This change applies to
+future probes only and cannot reconstruct historical thread ownership.
+
+每个探测在 `headers_parsed` 记录处理线程 native ID 与基线。后续阶段可记录
+`thread_time_ns()` 以及支持平台上的 `RUSAGE_THREAD` 缺页和主动/被动上下文切换
+的累计非负差值。观察线程不会代替处理线程采样或完成记录；线程 ID 变化、计数器回退、
+不支持平台和采样异常都保留未知。字段有界且只允许白名单整数。这些数据可显示同一处理
+线程在超时附近的工作量，但不能指认后备文件、证明延迟由换页造成，也不能据此断定
+GIL 或资源压力是根因。采样限制为七个固定阶段；检测到计数器回退后，本次探测后续
+阶段不再记录该计数器。pending/expired 只序列化处理线程已记录的数据，无法在其阻塞中
+采样，必须等其进入后续阶段才能得到该区间计数。本改动只影响未来探测，不能补造历史
+事件的线程归属。
