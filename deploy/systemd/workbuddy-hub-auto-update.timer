@@ -1,0 +1,11 @@
+[Unit]
+Description=Check WorkBuddy Hub verified releases
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+RandomizedDelaySec=20
+Persistent=true
+
+[Install]
+WantedBy=timers.target

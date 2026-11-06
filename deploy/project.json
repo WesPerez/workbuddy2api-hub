@@ -1,0 +1,1 @@
+{"id":"workbuddy-hub","repository":"WesPerez/workbuddy2api-hub","branch":"mine","workflow":".github/workflows/mine.yml","required_jobs":["verify"],"artifact":"production-runtime","archive_prefix":"workbuddy-hub"}

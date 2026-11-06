@@ -1,0 +1,25 @@
+[Unit]
+Description=WorkBuddy Hub gateway and delegated credential owner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/workbuddy-hub/current
+EnvironmentFile=/etc/workbuddy-hub/service.env
+ExecStart=/usr/bin/python3 -B wb_proxy.py --accounts-dir /var/lib/workbuddy-hub/accounts --usage-dir /var/lib/workbuddy-hub/usage
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+KillMode=control-group
+UMask=0077
+StateDirectory=workbuddy-hub
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=500
+
+[Install]
+WantedBy=multi-user.target
