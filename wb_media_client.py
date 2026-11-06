@@ -116,19 +116,28 @@ def _error_body(exc, limit=2000):
     return raw
 
 
+def _media_snapshot(account):
+    """Bind native media credentials and egress; a chat-only source is unrelated."""
+    headers, proxy = account.request_snapshot(
+        'media', header_factory=lambda: account.headers(purpose='media', media_identity=_IDENTITY))
+    base = wb_accounts.get_realm_config(account.realm)['chat_upstream']
+    return base, headers, proxy
+
+
 def _post(account, path, body, timeout, phase):
     """发一次媒体 POST，返回解析后的 JSON；非 2xx 一律翻成 MediaError。
 
     `phase` 透传给 `describe_media_failure()`，因为它决定一个 400 是
     `REJECTED`（提交阶段、没扣钱、可立刻重试）还是 `UPSTREAM`（已经花过钱）。
     """
-    url = account.chat_base_url() + path
+    base, headers, request_proxy = _media_snapshot(account)
+    url = base + path
     payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
         url, data=payload, method="POST",
-        headers=account.headers(purpose="media", media_identity=_IDENTITY))
+        headers=headers)
     try:
-        with wb_accounts.urlopen(request, timeout=timeout, proxy=account.proxy) as response:
+        with wb_accounts.urlopen(request, timeout=timeout, proxy=request_proxy) as response:
             raw = response.read()
     except urllib.error.HTTPError as exc:
         text = _error_body(exc).decode("utf-8", "replace")
@@ -145,11 +154,12 @@ def _post(account, path, body, timeout, phase):
 
 def _get_json(account, path, timeout):
     """读一次 JSON GET（目录）。只用于冷启动兜底，正常路径走内存缓存。"""
-    url = account.chat_base_url() + path
+    base, headers, request_proxy = _media_snapshot(account)
+    url = base + path
     request = urllib.request.Request(
-        url, method="GET", headers=account.headers(purpose="media", media_identity=_IDENTITY))
+        url, method="GET", headers=headers)
     try:
-        with wb_accounts.urlopen(request, timeout=timeout, proxy=account.proxy) as response:
+        with wb_accounts.urlopen(request, timeout=timeout, proxy=request_proxy) as response:
             raw = response.read()
     except urllib.error.HTTPError as exc:
         text = _error_body(exc).decode("utf-8", "replace")
@@ -322,13 +332,14 @@ def upload_reference_file(account, data, filename, timeout=UPLOAD_TIMEOUT_SECOND
             "参考素材 %d 字节，超过 %d 字节上限"
             % (len(data), wb_media.MAX_INPUT_IMAGE_BYTES))
     object_key = _upload_object_key(filename)
-    headers = dict(account.headers(purpose="media", media_identity=_IDENTITY))
+    base, headers, request_proxy = _media_snapshot(account)
+    headers = dict(headers)
     headers["Content-Type"] = "application/json"
     body = json.dumps({"object_keys": [object_key]}).encode("utf-8")
-    request = urllib.request.Request(account.chat_base_url() + UPLOAD_PRESIGN_PATH,
+    request = urllib.request.Request(base + UPLOAD_PRESIGN_PATH,
                                      method="POST", data=body, headers=headers)
     try:
-        with wb_accounts.urlopen(request, timeout=timeout, proxy=account.proxy) as response:
+        with wb_accounts.urlopen(request, timeout=timeout, proxy=request_proxy) as response:
             payload = json.loads(response.read())
     except urllib.error.HTTPError as exc:
         raise wb_media.MediaError(
@@ -341,7 +352,7 @@ def upload_reference_file(account, data, filename, timeout=UPLOAD_TIMEOUT_SECOND
                                  data=bytes(data),
                                  headers={"Content-Type": "application/octet-stream"})
     try:
-        with wb_accounts.urlopen(put, timeout=timeout, proxy=account.proxy) as response:
+        with wb_accounts.urlopen(put, timeout=timeout, proxy=request_proxy) as response:
             if response.status not in (200, 201, 204):
                 raise wb_media.MediaError(
                     "UPSTREAM", "上传到 COS 失败（HTTP %d）" % response.status)
@@ -436,6 +447,15 @@ def _mime_for_url(url):
 
 def _read_input_image(url, timeout=INPUT_IMAGE_TIMEOUT_SECONDS):
     """下载客户端给的输入图，返回 (bytes, 声明的 content-type)。"""
+    # This input is resolved before an account is selected. It has no fenced
+    # account egress, so deployments with managed identities accept inline
+    # image data instead of silently downloading through the host connection.
+    import wb_bridge
+    if wb_bridge.draining():
+        raise wb_media.MediaError("UPSTREAM", "gateway is draining")
+    if os.environ.get('WB_BRIDGE_TOKEN_FILE'):
+        raise wb_media.MediaError('INVALID_ARGS',
+            '受管出口的参考图请使用 data URL；当前远程图片下载尚未绑定账号出口')
     assert_public_url(url)
     request = urllib.request.Request(url, method="GET")
     try:

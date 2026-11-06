@@ -289,6 +289,23 @@ class WindowProbeTests(unittest.TestCase):
                 - 8 * 3600)
         self.assertEqual(reset_at, want)
 
+    def test_probe_uses_one_capability_and_route_snapshot(self):
+        account = self.account()
+        response = mock.MagicMock()
+        response.__enter__ = lambda self_: self_
+        response.__exit__ = lambda self_, *exc: False
+        response.read.return_value = b'data: [DONE]\n\n'
+        snapshot = ('https://source.example/chat/completions',
+                    {'Authorization': 'Bearer source-only'}, 'http://route.example:8080')
+        with mock.patch.object(account, 'capability_snapshot', return_value=snapshot) as capture, \
+                mock.patch.object(accounts, 'urlopen', return_value=response) as transport:
+            self.assertTrue(probe._probe(account, 'm')[0])
+        capture.assert_called_once()
+        self.assertEqual(transport.call_args.args[0].full_url, snapshot[0])
+        self.assertEqual(transport.call_args.kwargs['proxy'], snapshot[2])
+        self.assertEqual(transport.call_args.args[0].get_header('Authorization'),
+                         'Bearer source-only')
+
     def test_probe_reports_success_without_reset(self):
         account = self.account()
         resp = mock.MagicMock()

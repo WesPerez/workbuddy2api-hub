@@ -578,7 +578,7 @@ check("落盘的 analytics 条目带新形状的 pricing 记录",
 check("新记录随状态一起过判定（不改磁盘也能通过）",
       P._pricing_used_unchanged(
           _snap_entry["pricing"], P._pricing_inputs(True)), None)
-check("顶层 schema 是 5", _snap_file.get("schema") == 5, _snap_file.get("schema"))
+check("顶层 schema 是 6", _snap_file.get("schema") == 6, _snap_file.get("schema"))
 check("记录很小（几十个 pid + 几个模型名，序列化后 < 1KB）",
       len(json.dumps(_snap_entry["pricing"], ensure_ascii=False)) < 1024,
       len(json.dumps(_snap_entry["pricing"], ensure_ascii=False)))

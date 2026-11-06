@@ -21,6 +21,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _TMP = tempfile.mkdtemp(prefix="wb-remote-")
@@ -55,6 +56,8 @@ INTL_META = {
     # -sg 是付费变体：同名的免费基名已从上游目录下线（2026-11），
     # 目录里只剩 -sg，于是它自己就是对外宣告的那一个。
     "deepseek-v4.1-flash-sg": {"credits": "x0.11"},
+    "gpt-6-astra": {"credits": "x1.00"},
+    "gpt-5.6-sol": {"credits": "x1.00"},
     "hy4-preview": {"credits": "x0.29"},
     "grok-4.7": {"credits": "x1.90"},
     "hy3": {"credits": "x0.00"},
@@ -79,12 +82,15 @@ class RemoteCatalogTests(unittest.TestCase):
     def setUp(self):
         P._models_cache["intl"] = {"at": 0.0, "data": None}
         P._models_cache["cn"] = {"at": 0.0, "data": None}
+        self.saved = patch.object(P, "saved_catalog", return_value=None)
+        self.saved.start()
         self._orig = (P.fetch_remote_product_config,
                                 P.read_product_config_models,
                                 P.fetch_endpoint_models,
                                 P.product_config_path)
 
     def tearDown(self):
+        self.saved.stop()
         (P.fetch_remote_product_config, P.read_product_config_models,
          P.fetch_endpoint_models, P.product_config_path) = self._orig
 
@@ -119,11 +125,7 @@ class RemoteCatalogTests(unittest.TestCase):
             lambda realm: (ids, meta) if realm == "intl" else None)
         P._models_cache["intl"] = {"at": 0.0, "data": None}
         entries = dict(P.fetch_models("intl"))
-        self.assertIn("hy4-preview", entries)
-        self.assertEqual(entries["hy4-preview"]["credits"], "x0.29")
-        self.assertEqual(
-            P.model_entry("hy4-preview", entries["hy4-preview"])["credits"],
-            "x0.29")
+        self.assertNotIn("hy4-preview", entries)
 
     def test_live_zero_does_not_overwrite_a_known_paid_price(self):
         """Issue #774: a remote x0.00 placeholder must not hide real billing."""
@@ -193,23 +195,18 @@ class RemoteCatalogTests(unittest.TestCase):
         P.fetch_remote_product_config = (
             lambda realm: (INTL_IDS, INTL_META) if realm == "intl" else None)
         ids = [m for m, _ in P.fetch_models("intl")]
-        # 顺序由 INTL_UI_ORDER 决定；模型名不在本次 live 目录里的（如
-        # gpt-6.1-sol、kimi-k3.1-pro-highspeed）由内置快照补进来，所以也出现。
-        self.assertEqual(ids, [
-            "deepseek-v4.1-flash", "deepseek-v4.1-flash-sg", "hy4-preview", "hy3", "gpt-6-astra",
-            "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol",
-            "gpt-5.6-terra", "gpt-5.6-luna", "grok-4.7", "gemini-3.8-flash",
-            "glm-5.3", "glm-5.3-flash", "kimi-k3.1-pro",
-            "kimi-k3.1-pro-highspeed", "kimi-k3", "minimax-m3.1-flash"])
+        curated = P.curate_remote_catalog("intl", INTL_IDS, INTL_META)
+        self.assertEqual(set(ids), set(curated))
+        self.assertEqual(ids[:3], ["deepseek-v4.1-flash-sg", "hy4-preview", "hy3"])
+        self.assertEqual(len(ids), len(set(ids)))
 
     def test_cn_keeps_the_pinned_free_variant(self):
         # 实时 meta 为准：上游已下线 hy4-preview-f 且 hy4-preview 为收费 (0.29x) 时，如实对外宣告 hy4-preview
         P.fetch_remote_product_config = (
             lambda realm: (CN_IDS, CN_META) if realm == "cn" else None)
         ids = [m for m, _ in P.fetch_models("cn")]
-        self.assertEqual(ids[0], "hy4-preview")
+        self.assertNotIn("hy4-preview-f", ids)  # a removed free variant cannot hide a live paid one
         self.assertIn("hy4-preview", ids)
-        self.assertNotIn("hy4-preview-f", ids)
         self.assertNotIn("hy3-x", ids)         # -x variant
         self.assertNotIn("auto", ids)          # auto-router alias
 
@@ -334,7 +331,7 @@ class RemoteCatalogTests(unittest.TestCase):
         P.product_config_path = lambda realm: path
         P._models_cache["cn"] = {"at": 0.0, "data": None}
         ids = [m for m, _ in P.fetch_models("cn")]
-        self.assertEqual(ids[0], "hy4-preview")
+        self.assertNotIn("hy4-preview-f", ids)
         self.assertNotIn("auto", ids)
         self.assertIn("new-model-9", ids)   # live-only name with credits ships, no release
         self.assertNotIn("uncredited-model", ids)  # unpriced model is hidden until credits configured

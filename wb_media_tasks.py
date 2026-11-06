@@ -364,6 +364,12 @@ class MediaTaskStore(object):
             return sum(1 for task in self._tasks.values()
                        if task["status"] in ("queued", "running"))
 
+    def unfinished_count(self):
+        """Include accepted work awaiting submission in the release idle gate."""
+        with self._lock:
+            return sum(task['status'] in ('waiting', 'submitting', 'queued', 'running')
+                       for task in self._tasks.values())
+
     def stats(self):
         with self._lock:
             counts = {}

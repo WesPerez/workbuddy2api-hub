@@ -443,6 +443,21 @@ try:
     state.chat_error = None
     state.chat_error_remaining = -1
 
+    print("== unknown POST result is not replayed ==")
+    before_slots = acct.active_concurrent
+    uncertain = C.CodeArtsUnavailable('transport lost after POST')
+    uncertain.no_replay = True
+    with mock.patch.object(C, '_client_chat', side_effect=uncertain) as attempt, \
+         mock.patch.object(pool, 'pick', return_value=acct), \
+         mock.patch.object(pool, 'note_error'):
+        try:
+            C.open_chat(C.load_config(ACCOUNTS), body, 'sess-no-replay')
+            check('unknown result returned', False)
+        except C.CodeArtsUnavailable as exc:
+            check('unknown result returned', exc is uncertain)
+        check('unknown POST attempted once', attempt.call_count == 1)
+        check('unknown POST releases account slot', acct.active_concurrent == before_slots)
+
     print("== session header ==")
 
     def _chat_headers_of(session_key):

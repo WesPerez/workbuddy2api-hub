@@ -28,6 +28,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -82,13 +83,16 @@ class HashCompatibilityTests(PricingFixtureMixin):
     def test_regenerated_table_has_the_same_ids(self):
         """改动后重新生成一遍策略表，id 集合与改动前逐条一致。"""
         or_models = read_json(fixture("or_models.json"))
-        doc, _unpriced, _overridden = wb_pricing.build_snapshot(or_models,
-                                                                variants=True)
-        _added, _changed, assignment = wb_pricing.record_policies(
-            doc, at=1759360000)
         before = {row["model"]: row["id"]
                   for row in read_jsonl(fixture("policies_before.jsonl"))}
         self.assertTrue(before, "夹具里的改动前策略表不该是空的")
+        # Reproduce the historical input as well as its prices. New upstream
+        # membership must not change this audit of historical policy IDs.
+        with patch.object(wb_pricing, "hub_model_ids", return_value=list(before)):
+            doc, _unpriced, _overridden = wb_pricing.build_snapshot(or_models,
+                                                                    variants=True)
+        _added, _changed, assignment = wb_pricing.record_policies(
+            doc, at=1759360000)
         self.assertEqual(set(before.values()), set(assignment.values()),
                          "重新生成的策略 id 集合变了")
         self.assertEqual(before, assignment, "有模型的策略 id 变了")

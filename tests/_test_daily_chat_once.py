@@ -35,6 +35,12 @@ def make_account(last=None, realm="intl"):
     })
 
 
+# Exercise dormant upstream behavior with fake accounts/transports only.
+# Production policy remains False; tests/_test_bridge.py pins that boundary.
+import wb_bridge
+wb_bridge.daily_enabled = lambda: True
+
+
 class DailyChatOnceTests(unittest.TestCase):
     def test_today_done_skips_the_whole_activity(self):
         acc = make_account(today())

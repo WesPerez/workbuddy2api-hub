@@ -874,6 +874,14 @@ def invalidate_pool(accounts_dir=None):
 _OPENER_CACHE = {}
 _OPENER_LOCK = threading.Lock()
 _DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_HTTP_ACTIVE = 0
+_HTTP_ACTIVE_LOCK = threading.Lock()
+
+
+def busy_requests():
+    """Read active non-chat transport without constructing pools or starting tasks."""
+    with _HTTP_ACTIVE_LOCK:
+        return _HTTP_ACTIVE
 
 
 def _opener(proxy=""):
@@ -915,6 +923,20 @@ def _error_text(raw):
 
 def _http(method, url, headers=None, body=None, timeout=30.0, proxy=""):
     """发一个普通 HTTP 请求，返回 (status, raw_bytes)。"""
+    import wb_bridge
+    global _HTTP_ACTIVE
+    with _HTTP_ACTIVE_LOCK:
+        if wb_bridge.draining():
+            raise CodeArtsUnavailable("gateway is draining")
+        _HTTP_ACTIVE += 1
+    try:
+        return _http_request(method, url, headers, body, timeout, proxy)
+    finally:
+        with _HTTP_ACTIVE_LOCK:
+            _HTTP_ACTIVE -= 1
+
+
+def _http_request(method, url, headers=None, body=None, timeout=30.0, proxy=""):
     req = urllib.request.Request(url, data=body, headers=headers or {},
                                  method=method)
     try:
@@ -1969,6 +1991,9 @@ def _clamp_output_tokens(acct, model, body):
 
 
 def _client_chat(acct, body, session_key):
+    import wb_bridge
+    if wb_bridge.draining():
+        raise CodeArtsUnavailable("gateway is draining")
     model = _canonical_model(acct, body.get("model"))
     chat_id = body.get("chat_id") or _derive_chat_id(session_key, body.get("messages"))
     if not _valid_chat_id(chat_id):
@@ -2028,7 +2053,9 @@ def _client_chat(acct, body, session_key):
         except (urllib.error.URLError, socket.timeout, TimeoutError,
                 ConnectionError, OSError) as exc:
             reason = getattr(exc, "reason", None) or exc
-            raise CodeArtsUnavailable("连不上 CodeArts 聊天接口：%s" % reason)
+            error = CodeArtsUnavailable("CodeArts 聊天请求结果未知：%s" % reason)
+            error.no_replay = True
+            raise error from exc
         stream = CodeArtsStream(resp, model, acct, acct.pool)
         try:
             stream.preflight()
@@ -2095,6 +2122,8 @@ def open_chat(config, body, session_key=None, allowed_accounts=None):
         except CodeArtsUnavailable as exc:
             pool.note_error(acct, str(exc), soft=True)
             pool.release(acct)
+            if getattr(exc, 'no_replay', False):
+                raise
             exclude.add(acct.uid)
             last_error = exc
         except CodeArtsError as exc:
@@ -2967,6 +2996,9 @@ def _checked_in_today(acct, today):
 def _auto_checkin_worker(accounts):
     """后台线程：逐个领签到积分；任何失败都咽掉，绝不影响正在跑的会话。"""
     for acct in accounts:
+        import wb_bridge
+        if wb_bridge.draining():
+            return
         if acct.disabled or not getattr(acct, "tasks_enabled", True):
             continue
         try:
@@ -2981,6 +3013,9 @@ def _auto_checkin_worker(accounts):
 def _maybe_auto_checkin(pool):
     """惰性触发每日签到；同步部分只做判断与记账，真正的请求在后台线程。"""
     try:
+        import wb_bridge
+        if wb_bridge.draining():
+            return
         if getattr(_AUTO_CHECKIN_SUPPRESS, "depth", 0):
             return                      # 本线程正在手动签到，别抢
         if not pool.config.get("credits_auto_claim", False):

@@ -28,6 +28,12 @@ class _Stub(object):
         self.status = None
         self.payload = None
 
+    def _key_id(self):
+        return "test-key"
+
+    def _anthropic_error(self, code, message, err_type=None):
+        return self._error(code, message, err_type)
+
     def _error(self, code, message, err_type=None):
         self.status = code
         self.payload = {"error": {"message": message, "code": code}}
@@ -61,6 +67,20 @@ class ErrorStatusTests(unittest.TestCase):
         self.assertEqual(1, len(self.rows))
         self.assertEqual(503, self.rows[0]["status"])
         self.assertEqual(503, stub.status)
+
+    def test_failed_request_preserves_stream_mode(self):
+        for stream in (True, False):
+            proxy.upstream_failure_response(_Stub(), 'model', RuntimeError('failure'),
+                                            1000.0, stream=stream)
+            self.assertIs(self.rows[-1]['kwargs']['stream'], stream)
+
+    def test_codearts_errors_preserve_stream_mode(self):
+        for method in (proxy.Handler._codearts_error, proxy.Handler._codearts_anthropic_error):
+            for stream in (True, False):
+                method(_Stub(), 'model', proxy.wb_codearts.CodeArtsBadRequest('invalid'),
+                       1000.0, 'codearts', stream=stream)
+                self.assertIs(self.rows[-1]['kwargs']['stream'], stream)
+                self.assertEqual(self.rows[-1]['status'], 400)
 
     def test_upstream_unreachable_stays_502(self):
         exc = RuntimeError("Remote end closed connection without response")

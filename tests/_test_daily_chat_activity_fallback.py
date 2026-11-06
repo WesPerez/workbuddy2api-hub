@@ -22,6 +22,8 @@ from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
 _TMP = isolated_data_dirs("wb-daily-fallback-")
 
 import wb_accounts, wb_settings, wb_tasks  # noqa: E402
+# Exercise retained upstream protocol fixtures without enabling production tasks.
+wb_accounts.wb_bridge.daily_enabled = lambda: True
 
 UID = "5f3d1c02-0a51-4a0e-9a5f-2f3d6cd0b7a1"
 # 上游真实下发过的证书错误文本（见 issue #645 的报错原文）。

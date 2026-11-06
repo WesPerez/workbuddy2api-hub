@@ -37,6 +37,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _TMP = tempfile.mkdtemp(prefix="wb-catalog-refresh-")
@@ -55,8 +56,21 @@ CN_LIVE = (["hy4-preview-f", "hy3", "deepseek-v4.1-flash", "glm-5.3"],
 INTL_LIVE = (["grok-4.7"], {"grok-4.7": {"credits": "x1.90"}})
 
 
+def isolate_catalogue(test):
+    # Each case needs its own persisted last-good snapshot as well as memory.
+    # 每个用例隔离目录快照，避免上个用例的成功数据覆盖本用例的回退来源。
+    directory = tempfile.TemporaryDirectory(prefix="wb-catalog-case-")
+    test.addCleanup(directory.cleanup)
+    for name, value in (("ACCOUNTS_DIR", os.path.join(directory.name, "accounts")),
+                        ("CATALOG_CACHE_DIR", os.path.join(directory.name, "catalog"))):
+        patcher = patch.object(P, name, value)
+        patcher.start()
+        test.addCleanup(patcher.stop)
+
+
 class CatalogRefreshTests(unittest.TestCase):
     def setUp(self):
+        isolate_catalogue(self)
         P._models_cache["intl"] = {"at": 0.0, "data": None}
         P._models_cache["cn"] = {"at": 0.0, "data": None}
         P._catalog_meta.clear()
@@ -182,6 +196,7 @@ class CatalogProvenanceTests(unittest.TestCase):
     """
 
     def setUp(self):
+        isolate_catalogue(self)
         self._orig = (P.fetch_remote_product_config,
                       P.read_cached_remote_catalog,
                       P.read_product_config_models,
@@ -286,6 +301,7 @@ class CatalogDailyTests(unittest.TestCase):
             return object()
 
     def setUp(self):
+        isolate_catalogue(self)
         self._orig = (P.fetch_remote_product_config,
                       P.read_cached_remote_catalog,
                       P.read_product_config_models,
@@ -388,15 +404,17 @@ class _FakeResponse(object):
         return False
 
 
-class _Account(object):
-    access_token = "tok"
-    uid = "u-1"
-    proxy = None
+class _Account(P.wb_accounts.Account):
+    def __init__(self):
+        super().__init__({"uid": "u-1", "realm": "cn", "accessToken": "tok"})
 
 
 class _FakePool(object):
     def representative(self, realm=None):
         return _Account()
+
+    def representatives(self, realm=None):
+        return [self.representative(realm)]
 
 
 class CatalogDiskDumpTests(unittest.TestCase):
@@ -408,6 +426,7 @@ class CatalogDiskDumpTests(unittest.TestCase):
     """
 
     def setUp(self):
+        isolate_catalogue(self)
         self._dir = tempfile.mkdtemp(prefix="wb-catalog-dump-")
         self._orig = (P.CATALOG_CACHE_DIR, P.POOL, P.wb_accounts.urlopen)
         P.CATALOG_CACHE_DIR = self._dir

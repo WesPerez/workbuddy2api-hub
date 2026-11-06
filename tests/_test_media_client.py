@@ -37,6 +37,9 @@ class FakeAccount(object):
     enterprise_id = ""
     last_headers_purpose = None
 
+    def request_snapshot(self, purpose="chat", header_factory=None):
+        return (header_factory() if header_factory else self.headers(purpose)), self.proxy
+
     def chat_base_url(self):
         return "https://copilot.tencent.com"
 
@@ -350,6 +353,13 @@ class InputImageTests(unittest.TestCase):
 
     def test_data_url_passes_through(self):
         self.assertEqual(C.resolve_input_image(self.DATA_URL), self.DATA_URL)
+
+    def test_managed_input_does_not_download_before_egress_selection(self):
+        with mock.patch.dict(os.environ, {'WB_BRIDGE_TOKEN_FILE': '/fixture/bridge.token'}), \
+             mock.patch.object(C, '_no_redirect_opener') as opener:
+            self.assertEqual(self._code(lambda: C.resolve_input_image('https://8.8.8.8/image.png')), 'INVALID_ARGS')
+            self.assertEqual(C.resolve_input_image(self.DATA_URL), self.DATA_URL)
+            opener.assert_not_called()
 
     def test_oversized_data_url_is_rejected(self):
         big = "data:image/png;base64," + "A" * ((M.MAX_INPUT_IMAGE_BYTES // 3) * 4 + 8)

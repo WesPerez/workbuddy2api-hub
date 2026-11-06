@@ -34,6 +34,7 @@ class UpstreamSettingsTests(unittest.TestCase):
             "idle_timeout_seconds": 300,
             "device_token": "",
             "device_token_file": "",
+            "capabilities": {},
         })
 
     def test_partial_patch_merges_and_persists(self):
