@@ -56,7 +56,7 @@ def check(label, ok, detail=""):
 
 def rendered(disk_bytes, language):
     """服务端对文件做的事：把占位替换成实际语言（与 _dashboard 同一语义）。"""
-    return disk_bytes.replace(PLACEHOLDER,
+    return disk_bytes.replace(b'__WB_BASE__', b'').replace(PLACEHOLDER,
                               ('data-ui-language="%s"' % language).encode("utf-8"))
 
 

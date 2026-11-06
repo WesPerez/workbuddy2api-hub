@@ -233,6 +233,9 @@ function check(ok, msg){
     await new Promise(r => setImmediate(r));
     await new Promise(r => setImmediate(r));
     check(writes === 5, '切回人民币也要重画');
+    rows[0].outcome = 'incomplete';
+    await api.refresh();
+    check(writes === 6 && current.includes('输出截断'), '截断必须显示独立状态并刷新表格');
   }
 
   /* 6) 日志终端：没有新行一个字节都不动；有新行只 append；过滤变化整表重画；
